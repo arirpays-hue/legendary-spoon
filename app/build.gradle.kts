@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.example.screentranslator"
     compileSdk = 35
@@ -12,11 +14,23 @@ android {
         applicationId = "com.example.screentranslator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 10 + runNumber
+        versionName = "1.2.$runNumber"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    signingConfigs {
+        create("persistent") {
+            val ksFile = file("app-signing.jks")
+            if (ksFile.exists()) {
+                storeFile = ksFile
+                storePassword = "translator123"
+                keyAlias = "translator_key"
+                keyPassword = "translator123"
+            }
         }
     }
 
@@ -28,10 +42,16 @@ android {
 
     buildTypes {
         debug {
+            if (file("app-signing.jks").exists()) {
+                signingConfig = signingConfigs.getByName("persistent")
+            }
             isMinifyEnabled = false
             isShrinkResources = false
         }
         release {
+            if (file("app-signing.jks").exists()) {
+                signingConfig = signingConfigs.getByName("persistent")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
