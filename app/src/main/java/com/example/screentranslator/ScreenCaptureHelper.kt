@@ -3,6 +3,7 @@ package com.example.screentranslator
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -11,16 +12,26 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlin.math.max
 
 class ScreenCaptureHelper(
     private val context: Context,
     private val resultCode: Int,
     private val dataIntent: Intent,
-    private val width: Int,
-    private val height: Int,
-    private val densityDpi: Int
+    val fullWidth: Int,
+    val fullHeight: Int,
+    densityDpi: Int
 ) {
+    private val targetScale = 0.5f
+    val captureWidth: Int = max(16, (fullWidth * targetScale).toInt() and 15.inv())
+    val captureHeight: Int = max(16, (fullHeight * targetScale).toInt() and 1.inv())
+    val scaleX: Float = fullWidth.toFloat() / captureWidth.toFloat()
+    val scaleY: Float = fullHeight.toFloat() / captureHeight.toFloat()
+    private val captureDpi: Int = max(120, (densityDpi * targetScale).toInt())
+
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
@@ -28,17 +39,24 @@ class ScreenCaptureHelper(
     private var captureHandler: Handler? = null
 
     private val frameLock = Any()
+    private var reusableRawBitmap: Bitmap? = null
     private var latestBitmap: Bitmap? = null
+    private var latestCanvas: Canvas? = null
+
     @Volatile
     private var lastFrameTimestamp: Long = 0L
     @Volatile
-    private var requestFreshFrame: Boolean = true
+    private var frameVersion: Long = 0L
+    @Volatile
+    private var captureRequested: Boolean = true
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
             releaseDisplay()
         }
     }
+
+    fun getFrameVersion(): Long = frameVersion
 
     fun start(): Boolean {
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -52,38 +70,45 @@ class ScreenCaptureHelper(
         projection.registerCallback(projectionCallback, handler)
         mediaProjection = projection
 
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        val reader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2)
         reader.setOnImageAvailableListener({ ir ->
             val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
                 val now = System.currentTimeMillis()
-                val shouldDecode = requestFreshFrame || latestBitmap == null || (now - lastFrameTimestamp > 240L)
+                val shouldDecode = captureRequested || latestBitmap == null || (now - lastFrameTimestamp >= 180L)
                 if (!shouldDecode) return@setOnImageAvailableListener
 
                 val plane = image.planes[0]
-                val rowStride = plane.rowStride
+                val buffer = plane.buffer
                 val pixelStride = plane.pixelStride
-                val rowPadding = rowStride - pixelStride * width
+                val rowStride = plane.rowStride
+                if (pixelStride <= 0) return@setOnImageAvailableListener
 
-                val rawBitmap = Bitmap.createBitmap(
-                    width + rowPadding / pixelStride,
-                    height,
-                    Bitmap.Config.ARGB_8888
-                )
-                rawBitmap.copyPixelsFromBuffer(plane.buffer)
-                val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, width, height)
-                if (cropped != rawBitmap) {
-                    rawBitmap.recycle()
+                val strideWidth = rowStride / pixelStride
+                var raw = reusableRawBitmap
+                if (raw == null || raw.isRecycled || raw.width != strideWidth || raw.height != captureHeight) {
+                    raw?.recycle()
+                    raw = Bitmap.createBitmap(strideWidth, captureHeight, Bitmap.Config.ARGB_8888)
+                    reusableRawBitmap = raw
                 }
+
+                raw.copyPixelsFromBuffer(buffer)
 
                 synchronized(frameLock) {
-                    latestBitmap?.recycle()
-                    latestBitmap = cropped
+                    var dest = latestBitmap
+                    if (dest == null || dest.isRecycled || dest.width != captureWidth || dest.height != captureHeight) {
+                        dest?.recycle()
+                        dest = Bitmap.createBitmap(captureWidth, captureHeight, Bitmap.Config.ARGB_8888)
+                        latestBitmap = dest
+                        latestCanvas = Canvas(dest)
+                    }
+                    latestCanvas?.drawBitmap(raw, 0f, 0f, null)
                     lastFrameTimestamp = now
-                    requestFreshFrame = false
+                    frameVersion++
+                    captureRequested = false
                 }
             } catch (_: Exception) {
-                // Ignore transient frame copy errors
+                // Ignore transient buffer errors on display resize/rotation
             } finally {
                 image.close()
             }
@@ -92,9 +117,9 @@ class ScreenCaptureHelper(
 
         virtualDisplay = projection.createVirtualDisplay(
             "ScreenTranslatorDisplay",
-            width,
-            height,
-            densityDpi,
+            captureWidth,
+            captureHeight,
+            captureDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             reader.surface,
             null,
@@ -103,23 +128,22 @@ class ScreenCaptureHelper(
         return true
     }
 
-    suspend fun captureFrame(waitForFresh: Boolean = true): Bitmap? {
+    suspend fun captureFrame(waitForFresh: Boolean = true): Bitmap? = withContext(Dispatchers.Default) {
         val startRequestTime = System.currentTimeMillis()
-        requestFreshFrame = true
-
         if (waitForFresh) {
-            repeat(7) {
+            captureRequested = true
+            repeat(6) {
                 synchronized(frameLock) {
                     val bmp = latestBitmap
                     if (bmp != null && !bmp.isRecycled && lastFrameTimestamp >= startRequestTime) {
-                        return bmp.copy(Bitmap.Config.ARGB_8888, false)
+                        return@withContext bmp.copy(Bitmap.Config.ARGB_8888, false)
                     }
                 }
-                delay(45L)
+                delay(35L)
             }
         }
 
-        return synchronized(frameLock) {
+        synchronized(frameLock) {
             val bmp = latestBitmap
             if (bmp != null && !bmp.isRecycled) {
                 bmp.copy(Bitmap.Config.ARGB_8888, false)
@@ -135,9 +159,12 @@ class ScreenCaptureHelper(
         imageReader?.close()
         imageReader = null
         synchronized(frameLock) {
+            latestCanvas = null
             latestBitmap?.recycle()
             latestBitmap = null
         }
+        reusableRawBitmap?.recycle()
+        reusableRawBitmap = null
     }
 
     fun stop() {
