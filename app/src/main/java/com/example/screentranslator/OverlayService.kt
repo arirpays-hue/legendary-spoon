@@ -36,7 +36,7 @@ class OverlayService : Service() {
     private var captureHelper: ScreenCaptureHelper? = null
 
     private val recognizerHelper = TextRecognizerHelper()
-    private val translationEngine = TranslationEngine()
+    private val offlineTranslator = OfflineEnHeTranslator()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var loopJob: Job? = null
@@ -59,7 +59,12 @@ class OverlayService : Service() {
         }
 
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
-        val dataIntent: Intent? = intent?.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
+        val dataIntent: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra(EXTRA_DATA_INTENT)
+        }
 
         if (resultCode != 0 && dataIntent != null) {
             val metrics = DisplayMetrics()
@@ -136,18 +141,19 @@ class OverlayService : Service() {
 
         loopJob?.cancel()
         loopJob = serviceScope.launch {
+            offlineTranslator.prepareModel(requireWifiOnly = false)
             while (isActive && isTranslating) {
                 val frame = captureHelper?.captureFrame()
                 if (frame != null) {
                     try {
                         val blocks = recognizerHelper.recognize(frame)
                         val translatedBlocks = blocks.map { block ->
-                            val translated = translationEngine.translate(block.text)
+                            val translated = offlineTranslator.translateEnglishToHebrew(block.text)
                             block.copy(translatedText = translated)
                         }
                         overlayCanvasView.updateBlocks(translatedBlocks)
                     } catch (_: Exception) {
-                        // Ignore transient OCR errors on frame
+                        // Ignore transient OCR/translation errors
                     } finally {
                         frame.recycle()
                     }
@@ -179,7 +185,7 @@ class OverlayService : Service() {
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("Live screen translation active")
+            .setContentText("Offline EN -> HE screen translation active")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .build()
@@ -188,6 +194,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         stopTranslationLoop()
         captureHelper?.stop()
+        offlineTranslator.close()
         serviceScope.cancel()
         if (::overlayCanvasView.isInitialized) {
             windowManager.removeView(overlayCanvasView)
@@ -209,6 +216,7 @@ class OverlayService : Service() {
         private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textSize = 36f
+            textAlign = Paint.Align.RIGHT
         }
 
         fun updateBlocks(newBlocks: List<RecognizedBlock>) {
@@ -229,7 +237,7 @@ class OverlayService : Service() {
                 canvas.drawRoundRect(rect, 10f, 10f, boxPaint)
                 canvas.drawText(
                     block.translatedText,
-                    rect.left + 10f,
+                    rect.right - 10f,
                     rect.centerY() + (textPaint.textSize / 3f),
                     textPaint
                 )
