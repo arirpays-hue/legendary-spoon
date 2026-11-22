@@ -11,10 +11,12 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
@@ -42,6 +44,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
@@ -50,6 +53,7 @@ import kotlin.math.min
 class OverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
+    private lateinit var backdropCanvasView: TranslationCanvasView
     private lateinit var overlayCanvasView: TranslationCanvasView
 
     private lateinit var rootControlContainer: LinearLayout
@@ -62,13 +66,15 @@ class OverlayService : Service() {
 
     private var captureHelper: ScreenCaptureHelper? = null
     private val recognizerHelper = TextRecognizerHelper()
-    private val offlineTranslator = OfflineEnHeTranslator()
+    private lateinit var translationEngine: OfflineEnHeTranslator
     private val diffTracker = ScreenDiffTracker()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var autoLoopJob: Job? = null
+    private var watcherJob: Job? = null
 
     private var isAutoMode = false
+    private var offlineOnlyMode = false
+    private var skipBrandNames = true
     private var isBusy = false
     private var isDockedRight = true
     private var isMenuExpanded = false
@@ -82,6 +88,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        translationEngine = OfflineEnHeTranslator(applicationContext)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         statusBarHeight = loadSystemBarHeight("status_bar_height", dp(30))
         navBarHeight = loadSystemBarHeight("navigation_bar_height", dp(36))
@@ -102,6 +109,8 @@ class OverlayService : Service() {
             intent?.getParcelableExtra(EXTRA_DATA_INTENT)
         }
         val startInAuto = intent?.getBooleanExtra(EXTRA_AUTO_MODE, false) ?: false
+        offlineOnlyMode = intent?.getBooleanExtra(EXTRA_OFFLINE_ONLY, false) ?: false
+        skipBrandNames = intent?.getBooleanExtra(EXTRA_SKIP_BRANDS, true) ?: true
 
         if (resultCode == 0 || dataIntent == null) {
             stopSelf()
@@ -139,15 +148,26 @@ class OverlayService : Service() {
         }
         captureHelper = helper
 
+        startScreenWatcher()
+
         serviceScope.launch {
-            val ready = offlineTranslator.prepareModel()
-            if (ready.isFailure) {
-                Toast.makeText(
-                    this@OverlayService,
-                    "לא ניתן להוריד מודל תרגום — בדוק חיבור רשת בהפעלה ראשונה",
-                    Toast.LENGTH_LONG
-                ).show()
-            } else if (startInAuto) {
+            if (offlineOnlyMode) {
+                val ready = translationEngine.prepareModel()
+                if (ready.isFailure) {
+                    Toast.makeText(
+                        this@OverlayService,
+                        "המודל הלא-מקוון לא מותקן — הורד אותו במסך הראשי",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else {
+                // Warm up offline fallback silently in background
+                launch(Dispatchers.IO) {
+                    translationEngine.isModelDownloaded()
+                }
+            }
+
+            if (startInAuto) {
                 toggleAutoMode(true)
             } else {
                 Toast.makeText(
@@ -188,24 +208,30 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        overlayCanvasView = TranslationCanvasView(this)
-        val canvasParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            alpha = 1.0f
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        fun makeCanvasParams(): WindowManager.LayoutParams {
+            return WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                overlayType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                alpha = 1.0f
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
             }
         }
-        windowManager.addView(overlayCanvasView, canvasParams)
+
+        // Stacked opaque backdrop + foreground view eliminates OS-enforced overlay bleed-through
+        backdropCanvasView = TranslationCanvasView(this, isBackdropOnly = true)
+        overlayCanvasView = TranslationCanvasView(this, isBackdropOnly = false)
+        windowManager.addView(backdropCanvasView, makeCanvasParams())
+        windowManager.addView(overlayCanvasView, makeCanvasParams())
 
         rootControlContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -265,7 +291,7 @@ class OverlayService : Service() {
             setOnClickListener {
                 setMenuExpanded(false)
                 toggleAutoMode(false)
-                overlayCanvasView.updateBlocks(emptyList())
+                clearOverlayBlocks()
                 diffTracker.reset()
             }
         }
@@ -281,7 +307,6 @@ class OverlayService : Service() {
         menuContainer.addView(clearButton)
         menuContainer.addView(closeButton)
 
-        // Initial order for right-docked edge
         applyEdgeStyleAndOrder()
 
         controlParams = WindowManager.LayoutParams(
@@ -337,7 +362,6 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!isDragging) {
-                        // Safe toggle without detaching edgeHandle during touch dispatch
                         setMenuExpanded(!isMenuExpanded)
                     } else {
                         val center = controlParams.x + (rootControlContainer.width / 2)
@@ -455,24 +479,50 @@ class OverlayService : Service() {
         )
     }
 
+    private fun setOverlayVisibility(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.INVISIBLE
+        backdropCanvasView.visibility = v
+        overlayCanvasView.visibility = v
+    }
+
+    private fun updateOverlayBlocks(blocks: List<RecognizedBlock>) {
+        val layouts = OverlayLayoutEngine.compute(
+            blocks = blocks,
+            canvasWidth = overlayCanvasView.width.takeIf { it > 0 } ?: screenWidth,
+            canvasHeight = overlayCanvasView.height.takeIf { it > 0 } ?: screenHeight
+        )
+        backdropCanvasView.updateLayouts(blocks, layouts)
+        overlayCanvasView.updateLayouts(blocks, layouts)
+    }
+
+    private fun clearOverlayBlocks() {
+        backdropCanvasView.updateLayouts(emptyList(), emptyList())
+        overlayCanvasView.updateLayouts(emptyList(), emptyList())
+    }
+
+    private fun startScreenWatcher() {
+        watcherJob?.cancel()
+        watcherJob = serviceScope.launch {
+            while (isActive) {
+                delay(if (isAutoMode) 220L else 350L)
+                if (isBusy) continue
+                if (!isAutoMode && !overlayCanvasView.hasBlocks()) continue
+                checkScreenChanges()
+            }
+        }
+    }
+
     private fun toggleAutoMode(enable: Boolean) {
         isAutoMode = enable
-        autoLoopJob?.cancel()
-
         val bg = autoMenuButton.background as? GradientDrawable
+
         if (isAutoMode) {
             autoMenuButton.text = "עצור אוטומטי"
             bg?.setColor(Color.parseColor("#1D6F42"))
             updateIndicatorColor("#22C55E")
             diffTracker.reset()
-
-            autoLoopJob = serviceScope.launch {
+            serviceScope.launch {
                 runFullTranslation(showFeedback = false, hideOverlayFirst = true)
-                while (isActive && isAutoMode) {
-                    delay(420L)
-                    if (!isAutoMode || isBusy) continue
-                    checkAndTranslateChanges()
-                }
             }
         } else {
             autoMenuButton.text = "תרגום אוטומטי"
@@ -481,32 +531,40 @@ class OverlayService : Service() {
         }
     }
 
-    private suspend fun checkAndTranslateChanges() {
+    private suspend fun checkScreenChanges() {
         val frame = captureHelper?.captureFrame(waitForFresh = false) ?: return
         try {
+            val controlRect = getControlScreenRect()
             val maskedRects = buildList {
-                add(getControlScreenRect())
+                add(controlRect)
                 addAll(overlayCanvasView.getRenderedRects())
             }
-            val diff = diffTracker.analyze(
-                frame = frame,
-                maskedRects = maskedRects,
-                topInset = statusBarHeight,
-                bottomInset = navBarHeight
-            )
+            val diff = withContext(Dispatchers.Default) {
+                diffTracker.analyze(
+                    frame = frame,
+                    maskedRects = maskedRects,
+                    topInset = statusBarHeight,
+                    bottomInset = navBarHeight
+                )
+            }
 
             when (diff) {
                 is DiffResult.Unchanged -> Unit
 
                 is DiffResult.Partial -> {
-                    translateChangedRegion(frame, diff.dirtyRect)
+                    if (isAutoMode) {
+                        translateChangedRegion(frame, diff.dirtyRect)
+                    }
                 }
 
                 is DiffResult.FullChange -> {
-                    overlayCanvasView.updateBlocks(emptyList())
-                    waitForScreenToSettle()
+                    // Always clear stale bubbles immediately on scroll or app switch
+                    clearOverlayBlocks()
                     if (isAutoMode) {
-                        runFullTranslation(showFeedback = false, hideOverlayFirst = false)
+                        waitForScreenToSettle()
+                        if (isAutoMode) {
+                            runFullTranslation(showFeedback = false, hideOverlayFirst = false)
+                        }
                     }
                 }
             }
@@ -516,16 +574,19 @@ class OverlayService : Service() {
     }
 
     private suspend fun waitForScreenToSettle() {
-        repeat(4) {
-            delay(200L)
+        repeat(3) {
+            delay(170L)
             val probe = captureHelper?.captureFrame(waitForFresh = true) ?: return
             try {
-                val res = diffTracker.analyze(
-                    frame = probe,
-                    maskedRects = listOf(getControlScreenRect()),
-                    topInset = statusBarHeight,
-                    bottomInset = navBarHeight
-                )
+                val controlRect = getControlScreenRect()
+                val res = withContext(Dispatchers.Default) {
+                    diffTracker.analyze(
+                        frame = probe,
+                        maskedRects = listOf(controlRect),
+                        topInset = statusBarHeight,
+                        bottomInset = navBarHeight
+                    )
+                }
                 if (res is DiffResult.Unchanged) {
                     return
                 }
@@ -536,8 +597,18 @@ class OverlayService : Service() {
     }
 
     private suspend fun translateBlocksFiltered(blocks: List<RecognizedBlock>): List<RecognizedBlock> {
-        return blocks.mapNotNull { block ->
-            val translated = offlineTranslator.translateEnglishToHebrew(block.text)
+        val eligible = blocks.filterNot {
+            translationEngine.shouldSkipText(it.text, skipBrands = skipBrandNames)
+        }
+        if (eligible.isEmpty()) return emptyList()
+
+        val translatedMap = translationEngine.translateBatch(
+            texts = eligible.map { it.text },
+            offlineOnly = offlineOnlyMode
+        )
+
+        return eligible.mapNotNull { block ->
+            val translated = translatedMap[block.text]?.trim().orEmpty()
             val hasHebrew = translated.any { it in '\u0590'..'\u05FF' }
             if (hasHebrew && !translated.equals(block.text, ignoreCase = true)) {
                 block.copy(translatedText = translated)
@@ -571,8 +642,8 @@ class OverlayService : Service() {
 
             var freshFrame: Bitmap? = null
             val sourceBitmap = if (overlapping.isNotEmpty()) {
-                overlayCanvasView.updateBlocks(preserved)
-                delay(140L)
+                updateOverlayBlocks(preserved)
+                delay(90L)
                 freshFrame = captureHelper?.captureFrame(waitForFresh = true)
                 freshFrame ?: currentFrame
             } else {
@@ -595,7 +666,7 @@ class OverlayService : Service() {
                         excludeRect = getControlScreenRect()
                     )
                     val translatedNew = translateBlocksFiltered(detected)
-                    overlayCanvasView.updateBlocks(preserved + translatedNew)
+                    updateOverlayBlocks(preserved + translatedNew)
                 } finally {
                     cropped.recycle()
                 }
@@ -603,7 +674,7 @@ class OverlayService : Service() {
                 freshFrame?.recycle()
             }
         } catch (_: Exception) {
-            // Keep existing blocks intact on transient error
+            // Preserve existing blocks on transient partial OCR error
         } finally {
             updateIndicatorColor(if (isAutoMode) "#22C55E" else "#3B82F6")
             isBusy = false
@@ -619,13 +690,13 @@ class OverlayService : Service() {
         try {
             val hadBlocks = overlayCanvasView.hasBlocks()
             if (hideOverlayFirst && hadBlocks) {
-                overlayCanvasView.visibility = View.INVISIBLE
-                delay(160L)
+                setOverlayVisibility(false)
+                delay(95L)
             }
 
             val frame = captureHelper?.captureFrame(waitForFresh = true)
             if (hideOverlayFirst && hadBlocks) {
-                overlayCanvasView.visibility = View.VISIBLE
+                setOverlayVisibility(true)
             }
 
             if (frame == null) {
@@ -636,7 +707,10 @@ class OverlayService : Service() {
             }
 
             try {
-                diffTracker.updateBaseline(frame)
+                withContext(Dispatchers.Default) {
+                    diffTracker.updateBaseline(frame)
+                }
+
                 val blocks = recognizerHelper.recognize(
                     bitmap = frame,
                     minTopY = statusBarHeight,
@@ -645,7 +719,7 @@ class OverlayService : Service() {
                 )
 
                 val translatedBlocks = translateBlocksFiltered(blocks)
-                overlayCanvasView.updateBlocks(translatedBlocks)
+                updateOverlayBlocks(translatedBlocks)
                 if (translatedBlocks.isEmpty() && showFeedback) {
                     Toast.makeText(this, "לא נמצא טקסט באנגלית לתרגום", Toast.LENGTH_SHORT).show()
                 }
@@ -684,9 +758,10 @@ class OverlayService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val modeLabel = if (offlineOnlyMode) "מצב לא-מקוון" else "מצב היברידי מהיר"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("תרגום מסך לא-מקוון (אנגלית -> עברית) פעיל")
+            .setContentText("תרגום מסך ($modeLabel) פעיל")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .build()
@@ -694,10 +769,13 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         isRunning = false
-        toggleAutoMode(false)
+        watcherJob?.cancel()
         captureHelper?.stop()
-        offlineTranslator.close()
+        translationEngine.close()
         serviceScope.cancel()
+        if (::backdropCanvasView.isInitialized) {
+            runCatching { windowManager.removeView(backdropCanvasView) }
+        }
         if (::overlayCanvasView.isInitialized) {
             runCatching { windowManager.removeView(overlayCanvasView) }
         }
@@ -714,9 +792,9 @@ class OverlayService : Service() {
     }
 
     private class ScreenDiffTracker {
-        private val thumbW = 72
-        private val thumbH = 144
-        private val tileSize = 12
+        private val thumbW = 54
+        private val thumbH = 108
+        private val tileSize = 9
         private var baselinePixels: IntArray? = null
 
         fun reset() {
@@ -781,13 +859,13 @@ class OverlayService : Service() {
                             val delta = abs(Color.red(c1) - Color.red(c2)) +
                                 abs(Color.green(c1) - Color.green(c2)) +
                                 abs(Color.blue(c1) - Color.blue(c2))
-                            if (delta > 54) {
+                            if (delta > 52) {
                                 diffPixels++
                             }
                         }
                     }
 
-                    if (checkedPixels < 12) continue
+                    if (checkedPixels < 8) continue
                     totalActiveTiles++
 
                     if (diffPixels.toFloat() / checkedPixels > 0.14f) {
@@ -811,7 +889,7 @@ class OverlayService : Service() {
             }
 
             val changedRatio = changedTiles.toFloat() / totalActiveTiles
-            return if (changedRatio >= 0.22f) {
+            return if (changedRatio >= 0.20f) {
                 DiffResult.FullChange
             } else {
                 DiffResult.Partial(
@@ -845,79 +923,92 @@ class OverlayService : Service() {
         }
     }
 
-    private class TranslationCanvasView(context: Context) : View(context) {
-        private var blocks: List<RecognizedBlock> = emptyList()
-        private var renderedRects: List<Rect> = emptyList()
+    private data class RenderedBlockLayout(
+        val rect: RectF,
+        val angleDegrees: Float,
+        val bgTopColor: Int,
+        val bgBottomColor: Int,
+        val textColor: Int,
+        val needsTextShadow: Boolean,
+        val layout: StaticLayout,
+        val screenBounds: Rect
+    )
 
-        private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
+    private object OverlayLayoutEngine {
+        fun compute(
+            blocks: List<RecognizedBlock>,
+            canvasWidth: Int,
+            canvasHeight: Int
+        ): List<RenderedBlockLayout> {
+            if (blocks.isEmpty() || canvasWidth <= 0 || canvasHeight <= 0) return emptyList()
 
-        private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 1.5f
-        }
+            val sorted = blocks.filter { it.translatedText.isNotEmpty() }
+                .sortedWith(compareBy<RecognizedBlock> { it.bounds.top }.thenBy { it.bounds.left })
 
-        private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
+            val results = ArrayList<RenderedBlockLayout>(sorted.size)
+            val padX = 8f
+            val padY = 5f
 
-        fun hasBlocks(): Boolean = blocks.isNotEmpty()
-
-        fun getBlocks(): List<RecognizedBlock> = blocks
-
-        fun getRenderedRects(): List<Rect> = renderedRects
-
-        fun updateBlocks(newBlocks: List<RecognizedBlock>) {
-            blocks = newBlocks
-            renderedRects = newBlocks.map {
-                Rect(
-                    (it.bounds.left - 14).coerceAtLeast(0),
-                    (it.bounds.top - 10).coerceAtLeast(0),
-                    it.bounds.right + 14,
-                    it.bounds.bottom + 10
-                )
-            }
-            invalidate()
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val padX = 12f
-            val padY = 8f
-            val drawnRects = ArrayList<Rect>(blocks.size)
-
-            for (block in blocks) {
+            for (i in sorted.indices) {
+                val block = sorted[i]
                 val text = block.translatedText
-                if (text.isEmpty()) continue
-
                 val isRotated = abs(block.angleDegrees) >= 2.5f
                 val baseW = if (isRotated) block.orientedWidth else block.bounds.width()
                 val baseH = if (isRotated) block.orientedHeight else block.bounds.height()
-                val origW = baseW.coerceAtLeast(24)
-                val origH = baseH.coerceAtLeast(20)
-                val isCompactLabel = block.lineCount == 1 && origW < (width * 0.54f)
+                val origW = baseW.coerceAtLeast(22)
+                val origH = baseH.coerceAtLeast(18)
+                val isCompactLabel = block.lineCount == 1 && origW < (canvasWidth * 0.50f)
 
-                textPaint.color = block.textColor
+                val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = block.textColor
+                    if (block.needsTextShadow) {
+                        setShadowLayer(2.5f, 0f, 1.5f, Color.argb(145, 0, 0, 0))
+                    }
+                }
+
                 val avgLineHeight = origH.toFloat() / block.lineCount.coerceAtLeast(1)
-                var fontSize = (avgLineHeight * 0.80f).coerceIn(20f, 52f)
-                textPaint.textSize = fontSize
+                var fontSize = (avgLineHeight * 0.78f).coerceIn(19f, 50f)
+                paint.textSize = fontSize
+
+                // Find nearest left/right neighbors on the same row to prevent any box collisions
+                var minAllowedLeft = 6f
+                var maxAllowedRight = canvasWidth - 6f
+                if (!isRotated) {
+                    for (j in sorted.indices) {
+                        if (i == j) continue
+                        val other = sorted[j].bounds
+                        val vOverlap = min(block.bounds.bottom, other.bottom) - max(block.bounds.top, other.top)
+                        val minH = min(block.bounds.height(), other.height()).coerceAtLeast(1)
+                        if (vOverlap.toFloat() / minH > 0.30f) {
+                            if (other.right <= block.bounds.left + 8) {
+                                val mid = (other.right + block.bounds.left) / 2f + 3f
+                                minAllowedLeft = max(minAllowedLeft, mid)
+                            } else if (other.left >= block.bounds.right - 8) {
+                                val mid = (block.bounds.right + other.left) / 2f - 3f
+                                maxAllowedRight = min(maxAllowedRight, mid)
+                            }
+                        }
+                    }
+                }
 
                 val targetRect: RectF
                 val layout: StaticLayout
 
                 if (isCompactLabel) {
-                    val maxAllowedWidth = max(origW * 1.45f, width * 0.30f).coerceAtMost(width * 0.52f)
-                    var measuredWidth = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
+                    val columnLimit = (maxAllowedRight - minAllowedLeft - padX * 2f).coerceAtLeast(origW.toFloat())
+                    val maxAllowedWidth = min(columnLimit, max(origW * 1.45f, canvasWidth * 0.28f))
+                    var measuredWidth = ceil(StaticLayout.getDesiredWidth(text, paint).toDouble()).toFloat()
 
-                    while (measuredWidth > maxAllowedWidth && fontSize > 16f) {
-                        fontSize -= 1.5f
-                        textPaint.textSize = fontSize
-                        measuredWidth = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
+                    while (measuredWidth > maxAllowedWidth && fontSize > 15f) {
+                        fontSize -= 1.2f
+                        paint.textSize = fontSize
+                        measuredWidth = ceil(StaticLayout.getDesiredWidth(text, paint).toDouble()).toFloat()
                     }
 
                     val layoutWidth = max(origW.toFloat(), min(measuredWidth, maxAllowedWidth))
                         .toInt()
-                        .coerceAtLeast(28)
-                    layout = buildLayout(text, layoutWidth, fontSize, Layout.Alignment.ALIGN_CENTER)
+                        .coerceAtLeast(26)
+                    layout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_CENTER)
 
                     val boxW = max(origW + padX * 2f, layoutWidth + padX * 2f)
                     val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
@@ -934,36 +1025,38 @@ class OverlayService : Service() {
                     } else {
                         var left = centerX - (boxW / 2f)
                         var right = centerX + (boxW / 2f)
-                        if (left < 6f) {
-                            right += (6f - left)
-                            left = 6f
+                        if (left < minAllowedLeft) {
+                            right += (minAllowedLeft - left)
+                            left = minAllowedLeft
                         }
-                        if (right > width - 6f) {
-                            left -= (right - (width - 6f))
-                            right = width - 6f
+                        if (right > maxAllowedRight) {
+                            left -= (right - maxAllowedRight)
+                            right = maxAllowedRight
                         }
-                        left = left.coerceAtLeast(6f)
-                        val top = (centerY - boxH / 2f).coerceAtLeast(6f)
-                        val bottom = (top + boxH).coerceAtMost(height - 6f)
+                        left = left.coerceAtLeast(minAllowedLeft)
+                        right = right.coerceAtMost(maxAllowedRight).coerceAtLeast(left + 28f)
+                        val top = (centerY - boxH / 2f).coerceAtLeast(4f)
+                        val bottom = (top + boxH).coerceAtMost(canvasHeight - 4f)
                         targetRect = RectF(left, top, right, bottom)
                     }
                 } else {
                     val left = if (isRotated) {
                         block.bounds.exactCenterX() - origW / 2f - padX
                     } else {
-                        (block.bounds.left - padX).coerceAtLeast(6f)
+                        (block.bounds.left - padX).coerceAtLeast(minAllowedLeft)
                     }
                     val right = if (isRotated) {
                         block.bounds.exactCenterX() + origW / 2f + padX
                     } else {
-                        (block.bounds.right + padX).coerceAtMost(width - 6f)
+                        (block.bounds.right + padX).coerceAtMost(maxAllowedRight)
                     }
-                    val layoutWidth = (right - left - padX * 2f).toInt().coerceAtLeast(48)
+                    val layoutWidth = (right - left - padX * 2f).toInt().coerceAtLeast(44)
 
-                    var fittedLayout = buildLayout(text, layoutWidth, fontSize, Layout.Alignment.ALIGN_NORMAL)
-                    while (fittedLayout.height > origH + padY && fontSize > 16f) {
-                        fontSize -= 1.5f
-                        fittedLayout = buildLayout(text, layoutWidth, fontSize, Layout.Alignment.ALIGN_NORMAL)
+                    var fittedLayout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_NORMAL)
+                    while (fittedLayout.height > origH + padY && fontSize > 15f) {
+                        fontSize -= 1.2f
+                        paint.textSize = fontSize
+                        fittedLayout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_NORMAL)
                     }
                     layout = fittedLayout
 
@@ -971,63 +1064,113 @@ class OverlayService : Service() {
                     val top = if (isRotated) {
                         block.bounds.exactCenterY() - boxH / 2f
                     } else {
-                        (block.bounds.top - padY).coerceAtLeast(6f)
+                        (block.bounds.top - padY).coerceAtLeast(4f)
                     }
                     val bottom = if (isRotated) {
                         top + boxH
                     } else {
-                        (top + boxH).coerceAtMost(height - 6f)
+                        (top + boxH).coerceAtMost(canvasHeight - 4f)
                     }
                     targetRect = RectF(left, top, right, bottom)
                 }
 
-                // Force 100% opaque fill (alpha = 255) so original text never bleeds through
-                boxPaint.color = block.bgColor or -0x1000000
-                borderPaint.color = if (block.textColor == Color.WHITE) {
-                    Color.parseColor("#33FFFFFF")
-                } else {
-                    Color.parseColor("#2A000000")
-                }
-
-                canvas.save()
-                if (isRotated) {
-                    canvas.rotate(block.angleDegrees, targetRect.centerX(), targetRect.centerY())
-                }
-
-                canvas.drawRoundRect(targetRect, 12f, 12f, boxPaint)
-                canvas.drawRoundRect(targetRect, 12f, 12f, borderPaint)
-
-                val textLeft = targetRect.left + (targetRect.width() - layout.width) / 2f
-                val textTop = targetRect.top + (targetRect.height() - layout.height) / 2f
-                canvas.translate(textLeft, textTop)
-                layout.draw(canvas)
-                canvas.restore()
-
-                drawnRects.add(
-                    Rect(
-                        min(targetRect.left.toInt(), block.bounds.left),
-                        min(targetRect.top.toInt(), block.bounds.top),
-                        max(targetRect.right.toInt(), block.bounds.right),
-                        max(targetRect.bottom.toInt(), block.bounds.bottom)
+                results.add(
+                    RenderedBlockLayout(
+                        rect = targetRect,
+                        angleDegrees = block.angleDegrees,
+                        bgTopColor = block.bgTopColor or -0x1000000,
+                        bgBottomColor = block.bgBottomColor or -0x1000000,
+                        textColor = block.textColor,
+                        needsTextShadow = block.needsTextShadow,
+                        layout = layout,
+                        screenBounds = Rect(
+                            min(targetRect.left.toInt(), block.bounds.left),
+                            min(targetRect.top.toInt(), block.bounds.top),
+                            max(targetRect.right.toInt(), block.bounds.right),
+                            max(targetRect.bottom.toInt(), block.bounds.bottom)
+                        )
                     )
                 )
             }
 
-            renderedRects = drawnRects
+            return results
         }
 
-        private fun buildLayout(
+        private fun buildStaticLayout(
             text: String,
+            paint: TextPaint,
             widthPx: Int,
-            fontSize: Float,
             alignment: Layout.Alignment
         ): StaticLayout {
-            textPaint.textSize = fontSize
-            return StaticLayout.Builder.obtain(text, 0, text.length, textPaint, widthPx.coerceAtLeast(1))
+            return StaticLayout.Builder.obtain(text, 0, text.length, paint, widthPx.coerceAtLeast(1))
                 .setAlignment(alignment)
                 .setTextDirection(TextDirectionHeuristics.RTL)
                 .setIncludePad(false)
                 .build()
+        }
+    }
+
+    private class TranslationCanvasView(
+        context: Context,
+        private val isBackdropOnly: Boolean
+    ) : View(context) {
+
+        private var blocks: List<RecognizedBlock> = emptyList()
+        private var layouts: List<RenderedBlockLayout> = emptyList()
+
+        private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+
+        fun hasBlocks(): Boolean = blocks.isNotEmpty()
+
+        fun getBlocks(): List<RecognizedBlock> = blocks
+
+        fun getRenderedRects(): List<Rect> = layouts.map { it.screenBounds }
+
+        fun updateLayouts(newBlocks: List<RecognizedBlock>, newLayouts: List<RenderedBlockLayout>) {
+            blocks = newBlocks
+            layouts = newLayouts
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            for (item in layouts) {
+                val rect = item.rect
+                val isRotated = abs(item.angleDegrees) >= 2.5f
+
+                if (item.bgTopColor != item.bgBottomColor) {
+                    boxPaint.shader = LinearGradient(
+                        rect.left,
+                        rect.top,
+                        rect.left,
+                        rect.bottom,
+                        item.bgTopColor,
+                        item.bgBottomColor,
+                        Shader.TileMode.CLAMP
+                    )
+                } else {
+                    boxPaint.shader = null
+                    boxPaint.color = item.bgTopColor
+                }
+
+                canvas.save()
+                if (isRotated) {
+                    canvas.rotate(item.angleDegrees, rect.centerX(), rect.centerY())
+                }
+
+                canvas.drawRoundRect(rect, 10f, 10f, boxPaint)
+
+                if (!isBackdropOnly) {
+                    val textLeft = rect.left + (rect.width() - item.layout.width) / 2f
+                    val textTop = rect.top + (rect.height() - item.layout.height) / 2f
+                    canvas.translate(textLeft, textTop)
+                    item.layout.draw(canvas)
+                }
+
+                canvas.restore()
+            }
         }
     }
 
@@ -1041,5 +1184,7 @@ class OverlayService : Service() {
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_DATA_INTENT = "extra_data_intent"
         const val EXTRA_AUTO_MODE = "extra_auto_mode"
+        const val EXTRA_OFFLINE_ONLY = "extra_offline_only"
+        const val EXTRA_SKIP_BRANDS = "extra_skip_brands"
     }
 }
