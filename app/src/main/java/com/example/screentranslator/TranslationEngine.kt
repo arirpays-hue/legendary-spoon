@@ -36,23 +36,19 @@ class OfflineEnHeTranslator(context: Context) {
     @Volatile
     private var cacheLoaded = false
 
-    private val batchSeparator = "998877"
-    private val batchSplitRegex = Regex("\\s*998877\\s*")
-    private val hebrewRegex = Regex("[\\u0590-\\u05FF]")
-    private val camelCaseIdentifierRegex = Regex("^[a-z]+[A-Z][A-Za-z0-9]*$|^[A-Z][a-z]+[A-Z][A-Za-z0-9]*$")
-    private val codeOrPathRegex = Regex(".*([/\\\\]|://|\\.kt\\b|\\.xml\\b|\\.yml\\b|\\.json\\b|\\.gradle\\b|\\.apk\\b|\\.png\\b).*")
+    private val englishWordRegex = Regex("[A-Za-z]{2,}")
+    private val urlOrCodeFileRegex = Regex(
+        ".*(://|www\\.|\\.(kt|java|xml|yml|yaml|json|gradle|apk|png|jpg|mp4)\\b|[A-Za-z0-9_]+/[A-Za-z0-9_]+/[A-Za-z0-9_]+).*",
+        RegexOption.IGNORE_CASE
+    )
 
     private val skippedBrands = setOf(
-        "whatsapp", "spotify", "waze", "gemini", "brave", "bit", "firefox", "chrome",
-        "youtube", "instagram", "telegram", "tiktok", "facebook", "netflix", "github",
-        "android", "google", "google keep", "google play", "play store", "angry birds",
-        "angry birds 2", "angry birds reloaded", "bloons td 6", "capcut", "metrolist",
-        "ashell", "aida64", "shizuku", "termux", "zarchiver", "moovit", "egged", "canva",
-        "discord", "reddit", "snapchat", "gmail", "google maps", "google drive", "steam",
-        "nintendo", "switch", "xbox", "playstation", "aliexpress", "amazon", "ebay",
-        "wolt", "uber", "chatgpt", "claude", "copilot", "nova launcher", "mt manager",
-        "1dm", "1dm+", "mi remote", "wi-fi", "wifi", "bluetooth", "gps", "nfc", "volte",
-        "4g", "5g", "lte", "ok", "usb", "adb", "apk", "pdf", "vpn"
+        "whatsapp", "spotify", "waze", "gemini", "firefox", "chrome", "youtube",
+        "instagram", "telegram", "tiktok", "facebook", "netflix", "github", "gmail",
+        "capcut", "metrolist", "ashell", "aida64", "shizuku", "termux", "zarchiver",
+        "moovit", "egged", "canva", "discord", "reddit", "snapchat", "steam", "wolt",
+        "uber", "chatgpt", "claude", "1dm", "1dm+", "wi-fi", "wifi", "bluetooth",
+        "volte", "4g", "5g", "lte", "usb", "adb", "apk", "pdf", "vpn"
     )
 
     private fun ensureCacheLoaded() {
@@ -76,15 +72,11 @@ class OfflineEnHeTranslator(context: Context) {
         }
     }
 
-    private fun persistCacheAsync() {
+    private fun persistCache() {
         runCatching {
-            val snapshot = if (cache.size > 3500) {
-                cache.entries.take(3500)
-            } else {
-                cache.entries
-            }
+            val entries = if (cache.size > 4000) cache.entries.take(4000) else cache.entries
             val json = JSONObject()
-            for ((k, v) in snapshot) {
+            for ((k, v) in entries) {
                 json.put(k, v)
             }
             cacheFile.writeText(json.toString())
@@ -136,36 +128,21 @@ class OfflineEnHeTranslator(context: Context) {
         val text = rawText.trim()
         if (text.length < 2) return true
 
-        // Already contains Hebrew characters
-        if (hebrewRegex.containsMatchIn(text)) return true
+        val hebrewCount = text.count { it in '\u0590'..'\u05FF' }
+        val englishCount = text.count { it in 'A'..'Z' || it in 'a'..'z' }
+        if (englishCount < 2 || !englishWordRegex.containsMatchIn(text)) return true
 
-        // Code paths, URLs, filenames, or single-token camelCase identifiers
-        if (codeOrPathRegex.matches(text)) return true
-        if (!text.contains(' ') && camelCaseIdentifierRegex.matches(text)) return true
+        val totalLetters = hebrewCount + englishCount
+        if (hebrewCount > 0 && hebrewCount.toFloat() / totalLetters >= 0.35f) return true
 
-        // Truncated launcher labels like "Angry Birds Reloa.."
-        val wordCount = text.split(Regex("\\s+")).count { it.isNotEmpty() }
-        if ((text.endsWith("..") || text.endsWith("…")) && wordCount <= 3) return true
+        if (urlOrCodeFileRegex.matches(text)) return true
 
-        // Require mostly English letters (filters out "4GVoLTE", "1DM+", "AIDA64", "27%", symbols)
         val nonSpaceCount = text.count { !it.isWhitespace() }
-        val englishLetters = text.count { it in 'A'..'Z' || it in 'a'..'z' }
-        val digits = text.count { it.isDigit() }
-        if (englishLetters < 2) return true
-        if (nonSpaceCount > 0 && englishLetters.toFloat() / nonSpaceCount < 0.62f) return true
-        if (wordCount == 1 && digits > 0) return true
-
-        // Skip single 2-letter fragments except a few real UI words
-        val lower = text.lowercase(Locale.US).trim('.', ',', ':', '!', '?', '"', '\'', '(', ')')
-        if (lower.length == 2 && lower !in setOf("no", "on", "go", "up", "in", "by", "to", "or", "is", "me", "my")) {
-            return true
-        }
+        if (nonSpaceCount > 0 && englishCount.toFloat() / nonSpaceCount < 0.35f) return true
 
         if (skipBrands) {
+            val lower = text.lowercase(Locale.US).trim('.', ',', ':', '!', '?', '"', '\'', '(', ')')
             if (lower in skippedBrands) return true
-            if (lower.startsWith("angry birds") || lower.startsWith("google ") && wordCount <= 2) {
-                return true
-            }
         }
 
         return false
@@ -177,7 +154,10 @@ class OfflineEnHeTranslator(context: Context) {
     ): Map<String, String> = withContext(Dispatchers.IO) {
         ensureCacheLoaded()
 
-        val uniqueInputs = texts.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val uniqueInputs = texts
+            .map { it.replace('\n', ' ').trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
         if (uniqueInputs.isEmpty()) return@withContext emptyMap()
 
         val results = ConcurrentHashMap<String, String>()
@@ -192,9 +172,7 @@ class OfflineEnHeTranslator(context: Context) {
             }
         }
 
-        if (uncached.isEmpty()) {
-            return@withContext results
-        }
+        if (uncached.isEmpty()) return@withContext results
 
         val stillMissing = ArrayList<String>()
 
@@ -224,7 +202,7 @@ class OfflineEnHeTranslator(context: Context) {
         }
 
         if (results.isNotEmpty()) {
-            persistCacheAsync()
+            persistCache()
         }
 
         results
@@ -234,7 +212,7 @@ class OfflineEnHeTranslator(context: Context) {
         text: String,
         offlineOnly: Boolean = false
     ): String {
-        val clean = text.trim()
+        val clean = text.replace('\n', ' ').trim()
         if (clean.isEmpty()) return ""
         return translateBatch(listOf(clean), offlineOnly = offlineOnly)[clean] ?: ""
     }
@@ -242,25 +220,21 @@ class OfflineEnHeTranslator(context: Context) {
     private suspend fun translateBatchOnline(items: List<String>): Map<String, String> = coroutineScope {
         val out = ConcurrentHashMap<String, String>()
 
-        // Split into safe chunks under ~850 chars so GET stays fast and reliable
         val chunks = ArrayList<List<String>>()
         var current = ArrayList<String>()
         var currentLen = 0
         for (item in items) {
-            val safeItem = item.replace(batchSeparator, "")
-            if (current.isNotEmpty() && (current.size >= 10 || currentLen + safeItem.length > 850)) {
+            if (current.isNotEmpty() && (current.size >= 12 || currentLen + item.length > 900)) {
                 chunks.add(current)
                 current = ArrayList()
                 currentLen = 0
             }
             current.add(item)
-            currentLen += safeItem.length + 10
+            currentLen += item.length + 2
         }
-        if (current.isNotEmpty()) {
-            chunks.add(current)
-        }
+        if (current.isNotEmpty()) chunks.add(current)
 
-        val jobs = chunks.map { chunk ->
+        chunks.map { chunk ->
             async(Dispatchers.IO) {
                 if (chunk.size == 1) {
                     val single = fetchOnlineTranslation(chunk[0])
@@ -268,19 +242,17 @@ class OfflineEnHeTranslator(context: Context) {
                         out[chunk[0]] = single
                     }
                 } else {
-                    val canBatch = chunk.none { it.contains(batchSeparator) }
-                    val joined = if (canBatch) chunk.joinToString("\n$batchSeparator\n") else null
-                    val batched = joined?.let { fetchOnlineTranslation(it) }
-                    val split = batched?.split(batchSplitRegex)?.map { it.trim() }
+                    val joined = chunk.joinToString("\n")
+                    val batched = fetchOnlineTranslation(joined)
+                    val lines = batched?.split('\n')?.map { it.trim() }
 
-                    if (split != null && split.size == chunk.size) {
+                    if (lines != null && lines.size == chunk.size) {
                         for (i in chunk.indices) {
-                            if (split[i].isNotEmpty()) {
-                                out[chunk[i]] = split[i]
+                            if (lines[i].isNotEmpty()) {
+                                out[chunk[i]] = lines[i]
                             }
                         }
                     } else {
-                        // Parallel single-item fallback for this chunk
                         coroutineScope {
                             chunk.map { item ->
                                 async(Dispatchers.IO) {
@@ -294,8 +266,8 @@ class OfflineEnHeTranslator(context: Context) {
                     }
                 }
             }
-        }
-        jobs.awaitAll()
+        }.awaitAll()
+
         out
     }
 
@@ -306,8 +278,8 @@ class OfflineEnHeTranslator(context: Context) {
                 "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=iw&dt=t&q=$encoded"
             val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 1600
-                readTimeout = 2000
+                connectTimeout = 3500
+                readTimeout = 4500
                 setRequestProperty("User-Agent", "Mozilla/5.0")
             }
 
@@ -354,11 +326,6 @@ class OfflineEnHeTranslator(context: Context) {
             }
         }.awaitAll()
         out
-    }
-
-    fun clearCache() {
-        cache.clear()
-        runCatching { cacheFile.delete() }
     }
 
     fun close() {
