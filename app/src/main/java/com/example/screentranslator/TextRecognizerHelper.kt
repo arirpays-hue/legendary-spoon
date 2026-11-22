@@ -2,6 +2,7 @@ package com.example.screentranslator
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Point
 import android.graphics.Rect
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
@@ -36,11 +37,14 @@ data class RecognizedBlock(
 class TextRecognizerHelper {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val englishWordRegex = Regex("[A-Za-z]{2,}")
+    private val hebrewRegex = Regex("[\\u0590-\\u05FF]")
 
     suspend fun recognize(
         bitmap: Bitmap,
-        offsetX: Int = 0,
-        offsetY: Int = 0,
+        bitmapOffsetX: Int = 0,
+        bitmapOffsetY: Int = 0,
+        scaleX: Float = 1f,
+        scaleY: Float = 1f,
         minTopY: Int = 0,
         maxBottomY: Int = Int.MAX_VALUE,
         excludeRect: Rect? = null
@@ -50,8 +54,10 @@ class TextRecognizerHelper {
             extractBlocks(
                 bitmap = bitmap,
                 visionText = visionText,
-                offsetX = offsetX,
-                offsetY = offsetY,
+                bitmapOffsetX = bitmapOffsetX,
+                bitmapOffsetY = bitmapOffsetY,
+                scaleX = scaleX,
+                scaleY = scaleY,
                 minTopY = minTopY,
                 maxBottomY = maxBottomY,
                 excludeRect = excludeRect
@@ -69,91 +75,168 @@ class TextRecognizerHelper {
     private fun extractBlocks(
         bitmap: Bitmap,
         visionText: Text,
-        offsetX: Int,
-        offsetY: Int,
+        bitmapOffsetX: Int,
+        bitmapOffsetY: Int,
+        scaleX: Float,
+        scaleY: Float,
         minTopY: Int,
         maxBottomY: Int,
         excludeRect: Rect?
     ): List<RecognizedBlock> {
-        val result = ArrayList<RecognizedBlock>(visionText.textBlocks.size)
+        val result = ArrayList<RecognizedBlock>(visionText.textBlocks.size * 2)
 
         for (block in visionText.textBlocks) {
-            val localBox = block.boundingBox ?: continue
-            if (localBox.height() < 15 || localBox.width() < 18) continue
+            val lines = block.lines
+            if (lines.isEmpty()) continue
 
-            // Filter low-confidence OCR detections (prevents icon & Hebrew-misread hallucinations)
-            val confidences = block.lines.mapNotNull { line ->
-                runCatching { line.confidence }.getOrNull()?.takeIf { it > 0f }
-            }
-            if (confidences.isNotEmpty() && confidences.average() < 0.66) {
-                continue
-            }
+            if (shouldSplitIntoLines(lines)) {
+                for (line in lines) {
+                    val box = line.boundingBox ?: continue
+                    val conf = runCatching { line.confidence }.getOrNull()
+                    if (conf != null && conf > 0f && conf < 0.36f) continue
 
-            val cleanText = block.text.replace('\n', ' ').replace(Regex("\\s+"), " ").trim()
-            if (cleanText.isEmpty() || !englishWordRegex.containsMatchIn(cleanText)) {
-                continue
-            }
-
-            val screenBox = Rect(
-                localBox.left + offsetX,
-                localBox.top + offsetY,
-                localBox.right + offsetX,
-                localBox.bottom + offsetY
-            )
-
-            if (screenBox.bottom <= minTopY || screenBox.top >= maxBottomY) continue
-            if (excludeRect != null && Rect.intersects(screenBox, excludeRect)) continue
-
-            val corners = block.lines.firstOrNull()?.cornerPoints ?: block.cornerPoints
-            var angleDegrees = 0f
-            var orientedW = screenBox.width()
-            var orientedH = screenBox.height()
-
-            if (corners != null && corners.size == 4) {
-                val p0 = corners[0]
-                val p1 = corners[1]
-                val rawAngle = Math.toDegrees(
-                    atan2((p1.y - p0.y).toDouble(), (p1.x - p0.x).toDouble())
-                ).toFloat()
-
-                if (abs(rawAngle) in 2.5f..85f) {
-                    angleDegrees = rawAngle
-                    val blockCorners = block.cornerPoints
-                    if (blockCorners != null && blockCorners.size == 4) {
-                        val topLen = hypot(
-                            (blockCorners[1].x - blockCorners[0].x).toDouble(),
-                            (blockCorners[1].y - blockCorners[0].y).toDouble()
-                        ).toInt()
-                        val sideLen = hypot(
-                            (blockCorners[3].x - blockCorners[0].x).toDouble(),
-                            (blockCorners[3].y - blockCorners[0].y).toDouble()
-                        ).toInt()
-                        if (topLen > 16 && sideLen > 12) {
-                            orientedW = topLen
-                            orientedH = sideLen
-                        }
-                    }
+                    val built = buildRecognizedBlock(
+                        rawText = line.text,
+                        localBox = box,
+                        lineCount = 1,
+                        primaryCorners = line.cornerPoints,
+                        blockCorners = line.cornerPoints,
+                        bitmap = bitmap,
+                        bitmapOffsetX = bitmapOffsetX,
+                        bitmapOffsetY = bitmapOffsetY,
+                        scaleX = scaleX,
+                        scaleY = scaleY,
+                        minTopY = minTopY,
+                        maxBottomY = maxBottomY,
+                        excludeRect = excludeRect
+                    )
+                    if (built != null) result.add(built)
                 }
-            }
+            } else {
+                val box = block.boundingBox ?: continue
+                val confidences = lines.mapNotNull { line ->
+                    runCatching { line.confidence }.getOrNull()?.takeIf { it > 0f }
+                }
+                if (confidences.isNotEmpty() && confidences.average() < 0.38) continue
 
-            val palette = sampleExactPalette(bitmap, localBox)
-            result.add(
-                RecognizedBlock(
-                    text = cleanText,
-                    bounds = screenBox,
-                    lineCount = block.lines.size.coerceAtLeast(1),
-                    angleDegrees = angleDegrees,
-                    orientedWidth = orientedW.coerceAtLeast(20),
-                    orientedHeight = orientedH.coerceAtLeast(18),
-                    bgTopColor = palette.bgTopColor,
-                    bgBottomColor = palette.bgBottomColor,
-                    textColor = palette.textColor,
-                    needsTextShadow = palette.needsShadow
+                val built = buildRecognizedBlock(
+                    rawText = block.text,
+                    localBox = box,
+                    lineCount = lines.size,
+                    primaryCorners = lines.firstOrNull()?.cornerPoints ?: block.cornerPoints,
+                    blockCorners = block.cornerPoints,
+                    bitmap = bitmap,
+                    bitmapOffsetX = bitmapOffsetX,
+                    bitmapOffsetY = bitmapOffsetY,
+                    scaleX = scaleX,
+                    scaleY = scaleY,
+                    minTopY = minTopY,
+                    maxBottomY = maxBottomY,
+                    excludeRect = excludeRect
                 )
-            )
+                if (built != null) result.add(built)
+            }
         }
 
         return result
+    }
+
+    private fun shouldSplitIntoLines(lines: List<Text.Line>): Boolean {
+        if (lines.size <= 1) return false
+
+        // Split if mixed Hebrew/English lines exist in the same block
+        val hasHebrewLine = lines.any { hebrewRegex.containsMatchIn(it.text) }
+        if (hasHebrewLine) return true
+
+        val boxes = lines.mapNotNull { it.boundingBox }
+        if (boxes.size != lines.size) return true
+
+        val avgHeight = boxes.map { it.height() }.average().toFloat().coerceAtLeast(8f)
+        for (i in 0 until boxes.size - 1) {
+            val a = boxes[i]
+            val b = boxes[i + 1]
+            val verticalGap = b.top - a.bottom
+            if (verticalGap > avgHeight * 0.85f) return true
+
+            val leftShift = abs(b.left - a.left)
+            val centerShift = abs(b.centerX() - a.centerX())
+            if (leftShift > avgHeight * 2.2f && centerShift > avgHeight * 2.2f) return true
+        }
+        return false
+    }
+
+    private fun buildRecognizedBlock(
+        rawText: String,
+        localBox: Rect,
+        lineCount: Int,
+        primaryCorners: Array<Point>?,
+        blockCorners: Array<Point>?,
+        bitmap: Bitmap,
+        bitmapOffsetX: Int,
+        bitmapOffsetY: Int,
+        scaleX: Float,
+        scaleY: Float,
+        minTopY: Int,
+        maxBottomY: Int,
+        excludeRect: Rect?
+    ): RecognizedBlock? {
+        val cleanText = rawText.replace('\n', ' ').replace(Regex("\\s+"), " ").trim()
+        if (cleanText.isEmpty() || !englishWordRegex.containsMatchIn(cleanText)) return null
+
+        val screenBox = Rect(
+            ((localBox.left + bitmapOffsetX) * scaleX).toInt(),
+            ((localBox.top + bitmapOffsetY) * scaleY).toInt(),
+            ((localBox.right + bitmapOffsetX) * scaleX).toInt(),
+            ((localBox.bottom + bitmapOffsetY) * scaleY).toInt()
+        )
+
+        if (screenBox.height() < 14 || screenBox.width() < 16) return null
+        if (screenBox.bottom <= minTopY || screenBox.top >= maxBottomY) return null
+        if (excludeRect != null && Rect.intersects(screenBox, excludeRect)) return null
+
+        var angleDegrees = 0f
+        var orientedW = screenBox.width()
+        var orientedH = screenBox.height()
+
+        if (primaryCorners != null && primaryCorners.size == 4) {
+            val p0 = primaryCorners[0]
+            val p1 = primaryCorners[1]
+            val rawAngle = Math.toDegrees(
+                atan2((p1.y - p0.y).toDouble(), (p1.x - p0.x).toDouble())
+            ).toFloat()
+
+            if (abs(rawAngle) in 2.5f..85f) {
+                angleDegrees = rawAngle
+                if (blockCorners != null && blockCorners.size == 4) {
+                    val topLen = hypot(
+                        ((blockCorners[1].x - blockCorners[0].x) * scaleX).toDouble(),
+                        ((blockCorners[1].y - blockCorners[0].y) * scaleY).toDouble()
+                    ).toInt()
+                    val sideLen = hypot(
+                        ((blockCorners[3].x - blockCorners[0].x) * scaleX).toDouble(),
+                        ((blockCorners[3].y - blockCorners[0].y) * scaleY).toDouble()
+                    ).toInt()
+                    if (topLen > 16 && sideLen > 12) {
+                        orientedW = topLen
+                        orientedH = sideLen
+                    }
+                }
+            }
+        }
+
+        val palette = sampleExactPalette(bitmap, localBox)
+        return RecognizedBlock(
+            text = cleanText,
+            bounds = screenBox,
+            lineCount = lineCount.coerceAtLeast(1),
+            angleDegrees = angleDegrees,
+            orientedWidth = orientedW.coerceAtLeast(20),
+            orientedHeight = orientedH.coerceAtLeast(18),
+            bgTopColor = palette.bgTopColor,
+            bgBottomColor = palette.bgBottomColor,
+            textColor = palette.textColor,
+            needsTextShadow = palette.needsShadow
+        )
     }
 
     private data class SampledPalette(
@@ -166,12 +249,12 @@ class TextRecognizerHelper {
     private fun sampleExactPalette(bitmap: Bitmap, box: Rect): SampledPalette {
         val w = bitmap.width
         val h = bitmap.height
-        if (w <= 6 || h <= 6) {
+        if (w <= 4 || h <= 4) {
             return SampledPalette(Color.rgb(20, 23, 31), Color.rgb(20, 23, 31), Color.WHITE, false)
         }
 
-        val padX = 8
-        val padY = 8
+        val padX = 4
+        val padY = 4
         val regLeft = (box.left - padX).coerceIn(0, w - 1)
         val regRight = (box.right + padX).coerceIn(regLeft, w - 1)
         val regTop = (box.top - padY).coerceIn(0, h - 1)
@@ -188,19 +271,15 @@ class TextRecognizerHelper {
             return pixels[y * regW + x]
         }
 
-        // Sample top and bottom perimeter bands using median RGB (immune to icon edges)
-        val topBand = ArrayList<Int>(32)
-        val bottomBand = ArrayList<Int>(32)
-        val stepX = max(1, regW / 18)
+        val topBand = ArrayList<Int>(24)
+        val bottomBand = ArrayList<Int>(24)
+        val stepX = max(1, regW / 14)
 
         for (x in 0 until regW step stepX) {
             topBand.add(pixelAt(x, 0))
-            if (regH > 2) topBand.add(pixelAt(x, 1))
             bottomBand.add(pixelAt(x, regH - 1))
-            if (regH > 2) bottomBand.add(pixelAt(x, regH - 2))
         }
 
-        // Also include left/right midpoints to stabilize uniform backgrounds
         val midY = regH / 2
         topBand.add(pixelAt(0, (midY / 2).coerceAtLeast(0)))
         topBand.add(pixelAt(regW - 1, (midY / 2).coerceAtLeast(0)))
@@ -215,7 +294,6 @@ class TextRecognizerHelper {
             (Color.blue(bgTop) + Color.blue(bgBottom)) / 2
         )
 
-        // Sample interior pixels to recover exact original foreground text color
         val innerLeft = (box.left - regLeft).coerceIn(0, regW - 1)
         val innerRight = (box.right - regLeft).coerceIn(innerLeft, regW - 1)
         val innerTop = (box.top - regTop).coerceIn(0, regH - 1)
@@ -223,14 +301,14 @@ class TextRecognizerHelper {
 
         val innerW = (innerRight - innerLeft + 1).coerceAtLeast(1)
         val innerH = (innerBottom - innerTop + 1).coerceAtLeast(1)
-        val sampleStepX = max(1, innerW / 16)
-        val sampleStepY = max(1, innerH / 10)
+        val sampleStepX = max(1, innerW / 12)
+        val sampleStepY = max(1, innerH / 8)
 
         val bgR = Color.red(bgMid)
         val bgG = Color.green(bgMid)
         val bgB = Color.blue(bgMid)
 
-        val scored = ArrayList<Pair<Int, Int>>(160)
+        val scored = ArrayList<Pair<Int, Int>>(110)
         var y = innerTop
         while (y <= innerBottom) {
             var x = innerLeft
@@ -239,16 +317,14 @@ class TextRecognizerHelper {
                 val dr = Color.red(p) - bgR
                 val dg = Color.green(p) - bgG
                 val db = Color.blue(p) - bgB
-                val distSq = dr * dr + dg * dg + db * db
-                scored.add(distSq to p)
+                scored.add((dr * dr + dg * dg + db * db) to p)
                 x += sampleStepX
             }
             y += sampleStepY
         }
 
         scored.sortByDescending { it.first }
-        // Take the top 10% most-contrasting pixels to avoid antialiased edge muddiness
-        val takeCount = max(2, (scored.size * 0.10f).toInt())
+        val takeCount = max(2, (scored.size * 0.12f).toInt())
         val fgSamples = ArrayList<Int>(takeCount)
         for (i in 0 until min(takeCount, scored.size)) {
             fgSamples.add(scored[i].second)
@@ -260,19 +336,15 @@ class TextRecognizerHelper {
         val ratio = contrastRatio(bgMid, sampledFg)
 
         val finalFg = when {
-            // Preserve exact sampled text color when clearly readable
             ratio >= 4.2 -> sampledFg
-            // Near-white text on launcher/gradient -> snap cleanly to crisp white
-            fgLum > bgLum && bgLum < 0.62 -> Color.WHITE
-            // Near-black text on light surface -> snap cleanly to crisp dark charcoal
+            fgLum > bgLum && bgLum < 0.60 -> Color.WHITE
             fgLum <= bgLum && bgLum >= 0.35 -> Color.rgb(17, 24, 39)
-            // Fallback by background luminance
             bgLum > 0.45 -> Color.rgb(17, 24, 39)
             else -> Color.WHITE
         }
 
         val finalFgLum = relativeLuminance(finalFg)
-        val needsShadow = finalFgLum > 0.72 && bgLum in 0.14..0.62
+        val needsShadow = finalFgLum > 0.72 && bgLum in 0.14..0.60
 
         return SampledPalette(
             bgTopColor = bgTop,
