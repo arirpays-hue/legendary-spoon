@@ -4,8 +4,11 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -23,8 +26,10 @@ data class RecognizedBlock(
     val angleDegrees: Float = 0f,
     val orientedWidth: Int = bounds.width(),
     val orientedHeight: Int = bounds.height(),
-    val bgColor: Int = Color.rgb(20, 23, 31),
+    val bgTopColor: Int = Color.rgb(20, 23, 31),
+    val bgBottomColor: Int = Color.rgb(20, 23, 31),
     val textColor: Int = Color.WHITE,
+    val needsTextShadow: Boolean = false,
     val translatedText: String = ""
 )
 
@@ -39,184 +44,261 @@ class TextRecognizerHelper {
         minTopY: Int = 0,
         maxBottomY: Int = Int.MAX_VALUE,
         excludeRect: Rect? = null
-    ): List<RecognizedBlock> = suspendCoroutine { cont ->
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
-        recognizer.process(inputImage)
-            .addOnSuccessListener { visionText ->
-                val result = visionText.textBlocks.mapNotNull { block ->
-                    val cleanText = block.text.replace('\n', ' ').trim()
-                    val localBox = block.boundingBox ?: return@mapNotNull null
-
-                    if (cleanText.isEmpty() || !englishWordRegex.containsMatchIn(cleanText)) {
-                        return@mapNotNull null
-                    }
-
-                    val screenBox = Rect(
-                        localBox.left + offsetX,
-                        localBox.top + offsetY,
-                        localBox.right + offsetX,
-                        localBox.bottom + offsetY
-                    )
-
-                    if (screenBox.bottom <= minTopY || screenBox.top >= maxBottomY) {
-                        return@mapNotNull null
-                    }
-                    if (excludeRect != null && Rect.intersects(screenBox, excludeRect)) {
-                        return@mapNotNull null
-                    }
-
-                    val corners = block.lines.firstOrNull()?.cornerPoints ?: block.cornerPoints
-                    var angleDegrees = 0f
-                    var orientedW = screenBox.width()
-                    var orientedH = screenBox.height()
-
-                    if (corners != null && corners.size == 4) {
-                        val p0 = corners[0]
-                        val p1 = corners[1]
-                        val rawAngle = Math.toDegrees(
-                            atan2((p1.y - p0.y).toDouble(), (p1.x - p0.x).toDouble())
-                        ).toFloat()
-
-                        if (abs(rawAngle) in 2.5f..85f) {
-                            angleDegrees = rawAngle
-                            val blockCorners = block.cornerPoints
-                            if (blockCorners != null && blockCorners.size == 4) {
-                                val topLen = hypot(
-                                    (blockCorners[1].x - blockCorners[0].x).toDouble(),
-                                    (blockCorners[1].y - blockCorners[0].y).toDouble()
-                                ).toInt()
-                                val sideLen = hypot(
-                                    (blockCorners[3].x - blockCorners[0].x).toDouble(),
-                                    (blockCorners[3].y - blockCorners[0].y).toDouble()
-                                ).toInt()
-                                if (topLen > 16 && sideLen > 12) {
-                                    orientedW = topLen
-                                    orientedH = sideLen
-                                }
-                            }
-                        }
-                    }
-
-                    val (bgColor, textColor) = sampleBlockColors(bitmap, localBox)
-                    RecognizedBlock(
-                        text = cleanText,
-                        bounds = screenBox,
-                        lineCount = block.lines.size.coerceAtLeast(1),
-                        angleDegrees = angleDegrees,
-                        orientedWidth = orientedW.coerceAtLeast(20),
-                        orientedHeight = orientedH.coerceAtLeast(18),
-                        bgColor = bgColor,
-                        textColor = textColor
-                    )
-                }
-                cont.resume(result)
-            }
-            .addOnFailureListener { e ->
-                cont.resumeWithException(e)
-            }
+    ): List<RecognizedBlock> {
+        val visionText = processVisionText(bitmap)
+        return withContext(Dispatchers.Default) {
+            extractBlocks(
+                bitmap = bitmap,
+                visionText = visionText,
+                offsetX = offsetX,
+                offsetY = offsetY,
+                minTopY = minTopY,
+                maxBottomY = maxBottomY,
+                excludeRect = excludeRect
+            )
+        }
     }
 
-    private fun sampleBlockColors(bitmap: Bitmap, box: Rect): Pair<Int, Int> {
+    private suspend fun processVisionText(bitmap: Bitmap): Text = suspendCoroutine { cont ->
+        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        recognizer.process(inputImage)
+            .addOnSuccessListener { cont.resume(it) }
+            .addOnFailureListener { cont.resumeWithException(it) }
+    }
+
+    private fun extractBlocks(
+        bitmap: Bitmap,
+        visionText: Text,
+        offsetX: Int,
+        offsetY: Int,
+        minTopY: Int,
+        maxBottomY: Int,
+        excludeRect: Rect?
+    ): List<RecognizedBlock> {
+        val result = ArrayList<RecognizedBlock>(visionText.textBlocks.size)
+
+        for (block in visionText.textBlocks) {
+            val localBox = block.boundingBox ?: continue
+            if (localBox.height() < 15 || localBox.width() < 18) continue
+
+            // Filter low-confidence OCR detections (prevents icon & Hebrew-misread hallucinations)
+            val confidences = block.lines.mapNotNull { line ->
+                runCatching { line.confidence }.getOrNull()?.takeIf { it > 0f }
+            }
+            if (confidences.isNotEmpty() && confidences.average() < 0.66) {
+                continue
+            }
+
+            val cleanText = block.text.replace('\n', ' ').replace(Regex("\\s+"), " ").trim()
+            if (cleanText.isEmpty() || !englishWordRegex.containsMatchIn(cleanText)) {
+                continue
+            }
+
+            val screenBox = Rect(
+                localBox.left + offsetX,
+                localBox.top + offsetY,
+                localBox.right + offsetX,
+                localBox.bottom + offsetY
+            )
+
+            if (screenBox.bottom <= minTopY || screenBox.top >= maxBottomY) continue
+            if (excludeRect != null && Rect.intersects(screenBox, excludeRect)) continue
+
+            val corners = block.lines.firstOrNull()?.cornerPoints ?: block.cornerPoints
+            var angleDegrees = 0f
+            var orientedW = screenBox.width()
+            var orientedH = screenBox.height()
+
+            if (corners != null && corners.size == 4) {
+                val p0 = corners[0]
+                val p1 = corners[1]
+                val rawAngle = Math.toDegrees(
+                    atan2((p1.y - p0.y).toDouble(), (p1.x - p0.x).toDouble())
+                ).toFloat()
+
+                if (abs(rawAngle) in 2.5f..85f) {
+                    angleDegrees = rawAngle
+                    val blockCorners = block.cornerPoints
+                    if (blockCorners != null && blockCorners.size == 4) {
+                        val topLen = hypot(
+                            (blockCorners[1].x - blockCorners[0].x).toDouble(),
+                            (blockCorners[1].y - blockCorners[0].y).toDouble()
+                        ).toInt()
+                        val sideLen = hypot(
+                            (blockCorners[3].x - blockCorners[0].x).toDouble(),
+                            (blockCorners[3].y - blockCorners[0].y).toDouble()
+                        ).toInt()
+                        if (topLen > 16 && sideLen > 12) {
+                            orientedW = topLen
+                            orientedH = sideLen
+                        }
+                    }
+                }
+            }
+
+            val palette = sampleExactPalette(bitmap, localBox)
+            result.add(
+                RecognizedBlock(
+                    text = cleanText,
+                    bounds = screenBox,
+                    lineCount = block.lines.size.coerceAtLeast(1),
+                    angleDegrees = angleDegrees,
+                    orientedWidth = orientedW.coerceAtLeast(20),
+                    orientedHeight = orientedH.coerceAtLeast(18),
+                    bgTopColor = palette.bgTopColor,
+                    bgBottomColor = palette.bgBottomColor,
+                    textColor = palette.textColor,
+                    needsTextShadow = palette.needsShadow
+                )
+            )
+        }
+
+        return result
+    }
+
+    private data class SampledPalette(
+        val bgTopColor: Int,
+        val bgBottomColor: Int,
+        val textColor: Int,
+        val needsShadow: Boolean
+    )
+
+    private fun sampleExactPalette(bitmap: Bitmap, box: Rect): SampledPalette {
         val w = bitmap.width
         val h = bitmap.height
-        if (w <= 4 || h <= 4) {
-            return Color.rgb(20, 23, 31) to Color.WHITE
+        if (w <= 6 || h <= 6) {
+            return SampledPalette(Color.rgb(20, 23, 31), Color.rgb(20, 23, 31), Color.WHITE, false)
         }
 
-        val left = (box.left - 6).coerceIn(0, w - 1)
-        val right = (box.right + 6).coerceIn(0, w - 1)
-        val top = (box.top - 6).coerceIn(0, h - 1)
-        val bottom = (box.bottom + 6).coerceIn(0, h - 1)
-        val q1X = (box.left + box.width() / 4).coerceIn(0, w - 1)
-        val midX = ((box.left + box.right) / 2).coerceIn(0, w - 1)
-        val q3X = (box.left + (box.width() * 3) / 4).coerceIn(0, w - 1)
-        val midY = ((box.top + box.bottom) / 2).coerceIn(0, h - 1)
+        val padX = 8
+        val padY = 8
+        val regLeft = (box.left - padX).coerceIn(0, w - 1)
+        val regRight = (box.right + padX).coerceIn(regLeft, w - 1)
+        val regTop = (box.top - padY).coerceIn(0, h - 1)
+        val regBottom = (box.bottom + padY).coerceIn(regTop, h - 1)
 
-        val borderPoints = arrayOf(
-            left to top,
-            q1X to top,
-            midX to top,
-            q3X to top,
-            right to top,
-            left to bottom,
-            q1X to bottom,
-            midX to bottom,
-            q3X to bottom,
-            right to bottom,
-            left to midY,
-            right to midY
+        val regW = (regRight - regLeft + 1).coerceAtLeast(1)
+        val regH = (regBottom - regTop + 1).coerceAtLeast(1)
+        val pixels = IntArray(regW * regH)
+        bitmap.getPixels(pixels, 0, regW, regLeft, regTop, regW, regH)
+
+        fun pixelAt(localX: Int, localY: Int): Int {
+            val x = localX.coerceIn(0, regW - 1)
+            val y = localY.coerceIn(0, regH - 1)
+            return pixels[y * regW + x]
+        }
+
+        // Sample top and bottom perimeter bands using median RGB (immune to icon edges)
+        val topBand = ArrayList<Int>(32)
+        val bottomBand = ArrayList<Int>(32)
+        val stepX = max(1, regW / 18)
+
+        for (x in 0 until regW step stepX) {
+            topBand.add(pixelAt(x, 0))
+            if (regH > 2) topBand.add(pixelAt(x, 1))
+            bottomBand.add(pixelAt(x, regH - 1))
+            if (regH > 2) bottomBand.add(pixelAt(x, regH - 2))
+        }
+
+        // Also include left/right midpoints to stabilize uniform backgrounds
+        val midY = regH / 2
+        topBand.add(pixelAt(0, (midY / 2).coerceAtLeast(0)))
+        topBand.add(pixelAt(regW - 1, (midY / 2).coerceAtLeast(0)))
+        bottomBand.add(pixelAt(0, ((regH + midY) / 2).coerceAtMost(regH - 1)))
+        bottomBand.add(pixelAt(regW - 1, ((regH + midY) / 2).coerceAtMost(regH - 1)))
+
+        val bgTop = medianColor(topBand)
+        val bgBottom = medianColor(bottomBand)
+        val bgMid = Color.rgb(
+            (Color.red(bgTop) + Color.red(bgBottom)) / 2,
+            (Color.green(bgTop) + Color.green(bgBottom)) / 2,
+            (Color.blue(bgTop) + Color.blue(bgBottom)) / 2
         )
 
-        var bgSumR = 0
-        var bgSumG = 0
-        var bgSumB = 0
-        for ((px, py) in borderPoints) {
-            val pixel = bitmap.getPixel(px, py)
-            bgSumR += Color.red(pixel)
-            bgSumG += Color.green(pixel)
-            bgSumB += Color.blue(pixel)
-        }
+        // Sample interior pixels to recover exact original foreground text color
+        val innerLeft = (box.left - regLeft).coerceIn(0, regW - 1)
+        val innerRight = (box.right - regLeft).coerceIn(innerLeft, regW - 1)
+        val innerTop = (box.top - regTop).coerceIn(0, regH - 1)
+        val innerBottom = (box.bottom - regTop).coerceIn(innerTop, regH - 1)
 
-        var bgR = bgSumR / borderPoints.size
-        var bgG = bgSumG / borderPoints.size
-        var bgB = bgSumB / borderPoints.size
+        val innerW = (innerRight - innerLeft + 1).coerceAtLeast(1)
+        val innerH = (innerBottom - innerTop + 1).coerceAtLeast(1)
+        val sampleStepX = max(1, innerW / 16)
+        val sampleStepY = max(1, innerH / 10)
 
-        // Sample interior pixels to detect the original foreground text color
-        val innerLeft = box.left.coerceIn(0, w - 1)
-        val innerRight = box.right.coerceIn(innerLeft, w - 1)
-        val innerTop = box.top.coerceIn(0, h - 1)
-        val innerBottom = box.bottom.coerceIn(innerTop, h - 1)
+        val bgR = Color.red(bgMid)
+        val bgG = Color.green(bgMid)
+        val bgB = Color.blue(bgMid)
 
-        val candidates = ArrayList<Pair<Int, Int>>(24)
-        val cols = 6
-        val rows = 4
-        for (r in 1..rows) {
-            val py = innerTop + ((innerBottom - innerTop) * r) / (rows + 1)
-            for (c in 1..cols) {
-                val px = innerLeft + ((innerRight - innerLeft) * c) / (cols + 1)
-                val pixel = bitmap.getPixel(px.coerceIn(0, w - 1), py.coerceIn(0, h - 1))
-                val dist = abs(Color.red(pixel) - bgR) +
-                    abs(Color.green(pixel) - bgG) +
-                    abs(Color.blue(pixel) - bgB)
-                candidates.add(dist to pixel)
+        val scored = ArrayList<Pair<Int, Int>>(160)
+        var y = innerTop
+        while (y <= innerBottom) {
+            var x = innerLeft
+            while (x <= innerRight) {
+                val p = pixelAt(x, y)
+                val dr = Color.red(p) - bgR
+                val dg = Color.green(p) - bgG
+                val db = Color.blue(p) - bgB
+                val distSq = dr * dr + dg * dg + db * db
+                scored.add(distSq to p)
+                x += sampleStepX
             }
+            y += sampleStepY
         }
 
-        candidates.sortByDescending { it.first }
-        val topCount = max(1, candidates.size / 4)
-        var fgSumR = 0
-        var fgSumG = 0
-        var fgSumB = 0
-        for (i in 0 until topCount) {
-            val p = candidates[i].second
-            fgSumR += Color.red(p)
-            fgSumG += Color.green(p)
-            fgSumB += Color.blue(p)
+        scored.sortByDescending { it.first }
+        // Take the top 10% most-contrasting pixels to avoid antialiased edge muddiness
+        val takeCount = max(2, (scored.size * 0.10f).toInt())
+        val fgSamples = ArrayList<Int>(takeCount)
+        for (i in 0 until min(takeCount, scored.size)) {
+            fgSamples.add(scored[i].second)
+        }
+        val sampledFg = if (fgSamples.isNotEmpty()) medianColor(fgSamples) else Color.WHITE
+
+        val bgLum = relativeLuminance(bgMid)
+        val fgLum = relativeLuminance(sampledFg)
+        val ratio = contrastRatio(bgMid, sampledFg)
+
+        val finalFg = when {
+            // Preserve exact sampled text color when clearly readable
+            ratio >= 4.2 -> sampledFg
+            // Near-white text on launcher/gradient -> snap cleanly to crisp white
+            fgLum > bgLum && bgLum < 0.62 -> Color.WHITE
+            // Near-black text on light surface -> snap cleanly to crisp dark charcoal
+            fgLum <= bgLum && bgLum >= 0.35 -> Color.rgb(17, 24, 39)
+            // Fallback by background luminance
+            bgLum > 0.45 -> Color.rgb(17, 24, 39)
+            else -> Color.WHITE
         }
 
-        val sampledFg = Color.rgb(fgSumR / topCount, fgSumG / topCount, fgSumB / topCount)
-        var finalBg = Color.rgb(bgR, bgG, bgB)
-        var bgLum = relativeLuminance(finalBg)
+        val finalFgLum = relativeLuminance(finalFg)
+        val needsShadow = finalFgLum > 0.72 && bgLum in 0.14..0.62
 
-        // If background is in the awkward mid-tone range (like bright lilac/grey), darken slightly for crisp legibility
-        if (bgLum in 0.18..0.44) {
-            bgR = (bgR * 0.62f).toInt().coerceIn(0, 255)
-            bgG = (bgG * 0.62f).toInt().coerceIn(0, 255)
-            bgB = (bgB * 0.62f).toInt().coerceIn(0, 255)
-            finalBg = Color.rgb(bgR, bgG, bgB)
-            bgLum = relativeLuminance(finalBg)
+        return SampledPalette(
+            bgTopColor = bgTop,
+            bgBottomColor = bgBottom,
+            textColor = finalFg,
+            needsShadow = needsShadow
+        )
+    }
+
+    private fun medianColor(colors: List<Int>): Int {
+        if (colors.isEmpty()) return Color.rgb(20, 23, 31)
+        val n = colors.size
+        val rs = IntArray(n)
+        val gs = IntArray(n)
+        val bs = IntArray(n)
+        for (i in 0 until n) {
+            val c = colors[i]
+            rs[i] = Color.red(c)
+            gs[i] = Color.green(c)
+            bs[i] = Color.blue(c)
         }
-
-        val sampledContrast = contrastRatio(finalBg, sampledFg)
-        val finalFg = if (sampledContrast >= 4.5) {
-            sampledFg
-        } else if (bgLum > 0.36) {
-            Color.rgb(15, 23, 42)
-        } else {
-            Color.WHITE
-        }
-
-        return finalBg to finalFg
+        rs.sort()
+        gs.sort()
+        bs.sort()
+        val mid = n / 2
+        return Color.rgb(rs[mid], gs[mid], bs[mid])
     }
 
     private fun relativeLuminance(color: Int): Double {
