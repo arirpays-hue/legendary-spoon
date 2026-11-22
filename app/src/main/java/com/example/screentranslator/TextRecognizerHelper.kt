@@ -25,7 +25,8 @@ class TextRecognizerHelper {
                 val result = visionText.textBlocks.mapNotNull { block ->
                     val cleanText = block.text.replace('\n', ' ').trim()
                     val box = block.boundingBox
-                    if (cleanText.isNotEmpty() && box != null) {
+                    val hasEnglish = cleanText.any { it in 'A'..'Z' || it in 'a'..'z' }
+                    if (cleanText.isNotEmpty() && hasEnglish && box != null) {
                         RecognizedBlock(text = cleanText, bounds = box)
                     } else {
                         null
