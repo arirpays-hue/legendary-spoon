@@ -9,13 +9,22 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
 
 data class RecognizedBlock(
     val text: String,
     val bounds: Rect,
     val lineCount: Int = 1,
-    val bgColor: Int = Color.parseColor("#F514171F"),
-    val textColor: Int = Color.parseColor("#F8FAFC"),
+    val angleDegrees: Float = 0f,
+    val orientedWidth: Int = bounds.width(),
+    val orientedHeight: Int = bounds.height(),
+    val bgColor: Int = Color.rgb(20, 23, 31),
+    val textColor: Int = Color.WHITE,
     val translatedText: String = ""
 )
 
@@ -56,11 +65,46 @@ class TextRecognizerHelper {
                         return@mapNotNull null
                     }
 
+                    val corners = block.lines.firstOrNull()?.cornerPoints ?: block.cornerPoints
+                    var angleDegrees = 0f
+                    var orientedW = screenBox.width()
+                    var orientedH = screenBox.height()
+
+                    if (corners != null && corners.size == 4) {
+                        val p0 = corners[0]
+                        val p1 = corners[1]
+                        val rawAngle = Math.toDegrees(
+                            atan2((p1.y - p0.y).toDouble(), (p1.x - p0.x).toDouble())
+                        ).toFloat()
+
+                        if (abs(rawAngle) in 2.5f..85f) {
+                            angleDegrees = rawAngle
+                            val blockCorners = block.cornerPoints
+                            if (blockCorners != null && blockCorners.size == 4) {
+                                val topLen = hypot(
+                                    (blockCorners[1].x - blockCorners[0].x).toDouble(),
+                                    (blockCorners[1].y - blockCorners[0].y).toDouble()
+                                ).toInt()
+                                val sideLen = hypot(
+                                    (blockCorners[3].x - blockCorners[0].x).toDouble(),
+                                    (blockCorners[3].y - blockCorners[0].y).toDouble()
+                                ).toInt()
+                                if (topLen > 16 && sideLen > 12) {
+                                    orientedW = topLen
+                                    orientedH = sideLen
+                                }
+                            }
+                        }
+                    }
+
                     val (bgColor, textColor) = sampleBlockColors(bitmap, localBox)
                     RecognizedBlock(
                         text = cleanText,
                         bounds = screenBox,
                         lineCount = block.lines.size.coerceAtLeast(1),
+                        angleDegrees = angleDegrees,
+                        orientedWidth = orientedW.coerceAtLeast(20),
+                        orientedHeight = orientedH.coerceAtLeast(18),
                         bgColor = bgColor,
                         textColor = textColor
                     )
@@ -75,49 +119,119 @@ class TextRecognizerHelper {
     private fun sampleBlockColors(bitmap: Bitmap, box: Rect): Pair<Int, Int> {
         val w = bitmap.width
         val h = bitmap.height
-        if (w <= 2 || h <= 2) {
-            return Color.parseColor("#F514171F") to Color.parseColor("#F8FAFC")
+        if (w <= 4 || h <= 4) {
+            return Color.rgb(20, 23, 31) to Color.WHITE
         }
 
-        val left = (box.left - 4).coerceIn(0, w - 1)
-        val right = (box.right + 4).coerceIn(0, w - 1)
-        val top = (box.top - 4).coerceIn(0, h - 1)
-        val bottom = (box.bottom + 4).coerceIn(0, h - 1)
+        val left = (box.left - 6).coerceIn(0, w - 1)
+        val right = (box.right + 6).coerceIn(0, w - 1)
+        val top = (box.top - 6).coerceIn(0, h - 1)
+        val bottom = (box.bottom + 6).coerceIn(0, h - 1)
+        val q1X = (box.left + box.width() / 4).coerceIn(0, w - 1)
         val midX = ((box.left + box.right) / 2).coerceIn(0, w - 1)
+        val q3X = (box.left + (box.width() * 3) / 4).coerceIn(0, w - 1)
         val midY = ((box.top + box.bottom) / 2).coerceIn(0, h - 1)
 
-        val points = arrayOf(
+        val borderPoints = arrayOf(
             left to top,
+            q1X to top,
+            midX to top,
+            q3X to top,
             right to top,
             left to bottom,
-            right to bottom,
-            midX to top,
+            q1X to bottom,
             midX to bottom,
+            q3X to bottom,
+            right to bottom,
             left to midY,
             right to midY
         )
 
-        var sumR = 0
-        var sumG = 0
-        var sumB = 0
-        for ((px, py) in points) {
+        var bgSumR = 0
+        var bgSumG = 0
+        var bgSumB = 0
+        for ((px, py) in borderPoints) {
             val pixel = bitmap.getPixel(px, py)
-            sumR += Color.red(pixel)
-            sumG += Color.green(pixel)
-            sumB += Color.blue(pixel)
+            bgSumR += Color.red(pixel)
+            bgSumG += Color.green(pixel)
+            bgSumB += Color.blue(pixel)
         }
 
-        val avgR = sumR / points.size
-        val avgG = sumG / points.size
-        val avgB = sumB / points.size
+        var bgR = bgSumR / borderPoints.size
+        var bgG = bgSumG / borderPoints.size
+        var bgB = bgSumB / borderPoints.size
 
-        val luminance = (0.299 * avgR) + (0.587 * avgG) + (0.114 * avgB)
-        val bgColor = Color.argb(246, avgR, avgG, avgB)
-        val textColor = if (luminance > 145.0) {
-            Color.parseColor("#111827")
+        // Sample interior pixels to detect the original foreground text color
+        val innerLeft = box.left.coerceIn(0, w - 1)
+        val innerRight = box.right.coerceIn(innerLeft, w - 1)
+        val innerTop = box.top.coerceIn(0, h - 1)
+        val innerBottom = box.bottom.coerceIn(innerTop, h - 1)
+
+        val candidates = ArrayList<Pair<Int, Int>>(24)
+        val cols = 6
+        val rows = 4
+        for (r in 1..rows) {
+            val py = innerTop + ((innerBottom - innerTop) * r) / (rows + 1)
+            for (c in 1..cols) {
+                val px = innerLeft + ((innerRight - innerLeft) * c) / (cols + 1)
+                val pixel = bitmap.getPixel(px.coerceIn(0, w - 1), py.coerceIn(0, h - 1))
+                val dist = abs(Color.red(pixel) - bgR) +
+                    abs(Color.green(pixel) - bgG) +
+                    abs(Color.blue(pixel) - bgB)
+                candidates.add(dist to pixel)
+            }
+        }
+
+        candidates.sortByDescending { it.first }
+        val topCount = max(1, candidates.size / 4)
+        var fgSumR = 0
+        var fgSumG = 0
+        var fgSumB = 0
+        for (i in 0 until topCount) {
+            val p = candidates[i].second
+            fgSumR += Color.red(p)
+            fgSumG += Color.green(p)
+            fgSumB += Color.blue(p)
+        }
+
+        val sampledFg = Color.rgb(fgSumR / topCount, fgSumG / topCount, fgSumB / topCount)
+        var finalBg = Color.rgb(bgR, bgG, bgB)
+        var bgLum = relativeLuminance(finalBg)
+
+        // If background is in the awkward mid-tone range (like bright lilac/grey), darken slightly for crisp legibility
+        if (bgLum in 0.18..0.44) {
+            bgR = (bgR * 0.62f).toInt().coerceIn(0, 255)
+            bgG = (bgG * 0.62f).toInt().coerceIn(0, 255)
+            bgB = (bgB * 0.62f).toInt().coerceIn(0, 255)
+            finalBg = Color.rgb(bgR, bgG, bgB)
+            bgLum = relativeLuminance(finalBg)
+        }
+
+        val sampledContrast = contrastRatio(finalBg, sampledFg)
+        val finalFg = if (sampledContrast >= 4.5) {
+            sampledFg
+        } else if (bgLum > 0.36) {
+            Color.rgb(15, 23, 42)
         } else {
-            Color.parseColor("#F8FAFC")
+            Color.WHITE
         }
-        return bgColor to textColor
+
+        return finalBg to finalFg
+    }
+
+    private fun relativeLuminance(color: Int): Double {
+        fun channel(c: Int): Double {
+            val s = c / 255.0
+            return if (s <= 0.03928) s / 12.92 else ((s + 0.055) / 1.055).pow(2.4)
+        }
+        return 0.2126 * channel(Color.red(color)) +
+            0.7152 * channel(Color.green(color)) +
+            0.0722 * channel(Color.blue(color))
+    }
+
+    private fun contrastRatio(c1: Int, c2: Int): Double {
+        val l1 = relativeLuminance(c1)
+        val l2 = relativeLuminance(c2)
+        return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
     }
 }
