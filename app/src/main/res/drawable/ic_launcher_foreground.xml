@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Minimalist Screen Scan Corner Brackets -->
+    <path
+        android:pathData="M27,36 L27,29 C27,27.9 27.9,27 29,27 L36,27"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.2" />
+    <path
+        android:pathData="M72,27 L79,27 C80.1,27 81,27.9 81,29 L81,36"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.2" />
+    <path
+        android:pathData="M27,72 L27,79 C27,80.1 27.9,81 29,81 L36,81"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.2" />
+    <path
+        android:pathData="M72,81 L79,81 C80.1,81 81,80.1 81,79 L81,72"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.2" />
+
+    <!-- Back Tile (English 'A') -->
+    <path
+        android:fillColor="#24324A"
+        android:pathData="M34,34 L57,34 C59.8,34 62,36.2 62,39 L62,59 C62,61.8 59.8,64 57,64 L34,64 C31.2,64 29,61.8 29,59 L29,39 C29,36.2 31.2,34 34,34 Z"
+        android:strokeColor="#475569"
+        android:strokeWidth="1.2" />
+    <path
+        android:pathData="M38.5,56.5 L45.5,41 L52.5,56.5 M41,51.8 L50,51.8"
+        android:strokeColor="#E2E8F0"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.1" />
+
+    <!-- Front Tile (Hebrew 'א') -->
+    <path
+        android:fillColor="#3B82F6"
+        android:pathData="M51,45 L74,45 C76.8,45 79,47.2 79,50 L79,70 C79,72.8 76.8,75 74,75 L51,75 C48.2,75 46,72.8 46,70 L46,50 C46,47.2 48.2,45 51,45 Z" />
+    <!-- Geometric Hebrew Alef -->
+    <path
+        android:pathData="M56.5,53 L68.5,67"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.2" />
+    <path
+        android:pathData="M68,53 L68,56.5 C68,58.5 66.5,60 64.5,60 L63,60"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.1" />
+    <path
+        android:pathData="M57,67 L57,63.5 C57,61.5 58.5,60 60.5,60 L61.5,60"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3.1" />
+</vector>
