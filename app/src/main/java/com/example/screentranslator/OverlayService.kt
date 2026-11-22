@@ -1,5 +1,8 @@
 package com.example.screentranslator
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -32,6 +35,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -81,6 +85,7 @@ class OverlayService : Service() {
     private var isAutoMode = false
     private var offlineOnlyMode = true
     private var skipBrandNames = true
+    private var enableScanWave = true
     private var isBusy = false
     private var isDockedRight = true
     private var isMenuExpanded = false
@@ -117,6 +122,7 @@ class OverlayService : Service() {
         val startInAuto = intent?.getBooleanExtra(EXTRA_AUTO_MODE, false) ?: false
         offlineOnlyMode = intent?.getBooleanExtra(EXTRA_OFFLINE_ONLY, true) ?: true
         skipBrandNames = intent?.getBooleanExtra(EXTRA_SKIP_BRANDS, true) ?: true
+        enableScanWave = intent?.getBooleanExtra(EXTRA_SCAN_WAVE, true) ?: true
 
         if (resultCode == 0 || dataIntent == null) {
             stopSelf()
@@ -517,7 +523,8 @@ class OverlayService : Service() {
 
     private suspend fun updateOverlayBlocksIfCurrent(
         blocks: List<RecognizedBlock>,
-        expectedGeneration: Long
+        expectedGeneration: Long,
+        animateScanWave: Boolean = false
     ) {
         if (overlayGeneration.get() != expectedGeneration) return
         if (blocks.isEmpty()) {
@@ -534,20 +541,25 @@ class OverlayService : Service() {
             )
         }
         if (overlayGeneration.get() != expectedGeneration) return
-        overlayCanvasView.updateLayouts(blocks, layouts)
         overlayCanvasView.visibility = View.VISIBLE
+        overlayCanvasView.updateLayouts(
+            newBlocks = blocks,
+            newLayouts = layouts,
+            withScanWave = animateScanWave && enableScanWave
+        )
     }
 
     private fun clearOverlayBlocks() {
         overlayGeneration.incrementAndGet()
         if (::overlayCanvasView.isInitialized) {
-            overlayCanvasView.updateLayouts(emptyList(), emptyList())
+            overlayCanvasView.stopAnimations()
+            overlayCanvasView.updateLayouts(emptyList(), emptyList(), withScanWave = false)
             overlayCanvasView.visibility = View.GONE
         }
     }
 
-    private suspend fun refreshBaselineAfterOverlay() {
-        delay(120L)
+    private suspend fun refreshBaselineAfterOverlay(extraDelayMs: Long = 120L) {
+        delay(extraDelayMs)
         val helper = captureHelper ?: return
         val captured = helper.captureFrame(waitForFresh = false) ?: return
         try {
@@ -712,7 +724,7 @@ class OverlayService : Service() {
 
             var freshCapture: CapturedFrame? = null
             val activeCapture = if (overlapping.isNotEmpty()) {
-                updateOverlayBlocksIfCurrent(preserved, gen)
+                updateOverlayBlocksIfCurrent(preserved, gen, animateScanWave = false)
                 delay(90L)
                 freshCapture = helper.captureFrame(waitForFresh = true)
                 freshCapture ?: currentCapture
@@ -749,8 +761,8 @@ class OverlayService : Service() {
                     )
                     val translatedNew = translateBlocksFiltered(detected)
                     if (overlayGeneration.get() == gen) {
-                        updateOverlayBlocksIfCurrent(preserved + translatedNew, gen)
-                        refreshBaselineAfterOverlay()
+                        updateOverlayBlocksIfCurrent(preserved + translatedNew, gen, animateScanWave = false)
+                        refreshBaselineAfterOverlay(120L)
                     }
                 } finally {
                     cropped.recycle()
@@ -777,6 +789,7 @@ class OverlayService : Service() {
         try {
             val hadBlocks = overlayCanvasView.hasBlocks()
             if (hideOverlayFirst && hadBlocks) {
+                overlayCanvasView.stopAnimations()
                 overlayCanvasView.visibility = View.GONE
                 delay(90L)
             }
@@ -805,7 +818,11 @@ class OverlayService : Service() {
                 val translatedBlocks = translateBlocksFiltered(blocks)
                 if (overlayGeneration.get() != gen) return
 
-                updateOverlayBlocksIfCurrent(translatedBlocks, gen)
+                updateOverlayBlocksIfCurrent(
+                    blocks = translatedBlocks,
+                    expectedGeneration = gen,
+                    animateScanWave = translatedBlocks.isNotEmpty()
+                )
 
                 if (translatedBlocks.isEmpty()) {
                     withContext(Dispatchers.Default) {
@@ -816,7 +833,7 @@ class OverlayService : Service() {
                         Toast.makeText(this, "לא נמצא טקסט באנגלית לתרגום", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    refreshBaselineAfterOverlay()
+                    refreshBaselineAfterOverlay(if (enableScanWave) 640L else 120L)
                 }
             } finally {
                 captured.bitmap.recycle()
@@ -870,6 +887,7 @@ class OverlayService : Service() {
         translationEngine.close()
         serviceScope.cancel()
         if (::overlayCanvasView.isInitialized) {
+            overlayCanvasView.stopAnimations()
             runCatching { windowManager.removeView(overlayCanvasView) }
         }
         if (::rootControlContainer.isInitialized) {
@@ -1209,8 +1227,22 @@ class OverlayService : Service() {
         private var blocks: List<RecognizedBlock> = emptyList()
         private var layouts: List<RenderedBlockLayout> = emptyList()
 
+        private var scanWaveAnimator: ValueAnimator? = null
+        private var scanWaveActive: Boolean = false
+        private var scanWaveFraction: Float = 1f
+
         private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
+        }
+
+        private val waveBandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+
+        private val waveCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#E0F2FE")
+            style = Paint.Style.FILL
+            setShadowLayer(18f, 0f, 0f, Color.parseColor("#38BDF8"))
         }
 
         fun hasBlocks(): Boolean = blocks.isNotEmpty()
@@ -1219,16 +1251,71 @@ class OverlayService : Service() {
 
         fun getRenderedRects(): List<Rect> = layouts.map { it.screenBounds }
 
-        fun updateLayouts(newBlocks: List<RecognizedBlock>, newLayouts: List<RenderedBlockLayout>) {
+        fun stopAnimations() {
+            scanWaveAnimator?.cancel()
+            scanWaveAnimator = null
+            scanWaveActive = false
+            scanWaveFraction = 1f
+        }
+
+        fun updateLayouts(
+            newBlocks: List<RecognizedBlock>,
+            newLayouts: List<RenderedBlockLayout>,
+            withScanWave: Boolean
+        ) {
             blocks = newBlocks
             layouts = newLayouts
-            invalidate()
+            if (withScanWave && newLayouts.isNotEmpty()) {
+                startScanWave()
+            } else {
+                stopAnimations()
+                invalidate()
+            }
+        }
+
+        private fun startScanWave() {
+            scanWaveAnimator?.cancel()
+            scanWaveActive = true
+            scanWaveFraction = 0f
+
+            scanWaveAnimator = ValueAnimator.ofFloat(0f, 1.08f).apply {
+                duration = 560L
+                interpolator = PathInterpolator(0.22f, 1f, 0.36f, 1f)
+                addUpdateListener { anim ->
+                    scanWaveFraction = anim.animatedValue as Float
+                    invalidate()
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        scanWaveActive = false
+                        scanWaveFraction = 1f
+                        invalidate()
+                    }
+
+                    override fun onAnimationCancel(animation: Animator) {
+                        scanWaveActive = false
+                        scanWaveFraction = 1f
+                    }
+                })
+                start()
+            }
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            val totalHeight = height.toFloat().coerceAtLeast(1f)
+            val waveY = scanWaveFraction * totalHeight
+
             for (item in layouts) {
                 val rect = item.rect
+                val revealAlpha = if (!scanWaveActive) {
+                    1f
+                } else {
+                    ((waveY - rect.top) / 140f).coerceIn(0f, 1f)
+                }
+                if (revealAlpha <= 0.01f) continue
+
+                val alphaInt = (255 * revealAlpha).toInt().coerceIn(0, 255)
                 val isRotated = abs(item.angleDegrees) >= 2.5f
 
                 if (item.bgTopColor != item.bgBottomColor) {
@@ -1245,6 +1332,8 @@ class OverlayService : Service() {
                     boxPaint.shader = null
                     boxPaint.color = item.bgTopColor
                 }
+                boxPaint.alpha = alphaInt
+                item.layout.paint.alpha = alphaInt
 
                 canvas.save()
                 if (isRotated) {
@@ -1258,6 +1347,26 @@ class OverlayService : Service() {
                 canvas.translate(textLeft, textTop)
                 item.layout.draw(canvas)
                 canvas.restore()
+            }
+
+            if (scanWaveActive && waveY < totalHeight + 80f) {
+                val trailHeight = 140f
+                val bandTop = (waveY - trailHeight).coerceAtLeast(0f)
+                waveBandPaint.shader = LinearGradient(
+                    0f,
+                    bandTop,
+                    0f,
+                    waveY,
+                    intArrayOf(
+                        Color.TRANSPARENT,
+                        Color.parseColor("#333B82F6"),
+                        Color.parseColor("#9938BDF8")
+                    ),
+                    floatArrayOf(0f, 0.65f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+                canvas.drawRect(0f, bandTop, width.toFloat(), waveY, waveBandPaint)
+                canvas.drawRect(0f, waveY - 4f, width.toFloat(), waveY + 2f, waveCorePaint)
             }
         }
     }
@@ -1274,5 +1383,6 @@ class OverlayService : Service() {
         const val EXTRA_AUTO_MODE = "extra_auto_mode"
         const val EXTRA_OFFLINE_ONLY = "extra_offline_only"
         const val EXTRA_SKIP_BRANDS = "extra_skip_brands"
+        const val EXTRA_SCAN_WAVE = "extra_scan_wave"
     }
 }
