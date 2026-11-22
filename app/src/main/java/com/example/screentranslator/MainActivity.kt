@@ -1,8 +1,10 @@
 package com.example.screentranslator
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -41,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -53,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 
@@ -68,20 +72,24 @@ private val TextSecondary = Color(0xFF94A3B8)
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var localTranslator: OfflineEnHeTranslator
+    private val localTranslator = OfflineEnHeTranslator()
 
     private var hasOverlayPermission by mutableStateOf(false)
     private var isModelReady by mutableStateOf(false)
     private var isDownloadingModel by mutableStateOf(false)
-    private var isServiceActive by mutableStateOf(false)
     private var startInAutoMode by mutableStateOf(true)
-    private var offlineOnlyMode by mutableStateOf(false)
+    private var offlineOnlyMode by mutableStateOf(true)
     private var skipBrandNames by mutableStateOf(true)
     private var statusMessage by mutableStateOf("מוכן להפעלה")
 
     private var sampleInput by mutableStateOf("Settings will be saved automatically when you exit.")
     private var sampleOutput by mutableStateOf("")
     private var isTestingTranslation by mutableStateOf(false)
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            launchScreenCapturePrompt()
+        }
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -98,7 +106,6 @@ class MainActivity : ComponentActivity() {
                 } else {
                     startService(serviceIntent)
                 }
-                isServiceActive = true
                 statusMessage = "המתרגם הצף פעיל — עבור לכל אפליקציה באנגלית"
             } else {
                 statusMessage = "הרשאת צילום המסך בוטלה"
@@ -107,11 +114,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        localTranslator = OfflineEnHeTranslator(applicationContext)
         refreshStates()
         checkOfflineModel()
 
         setContent {
+            val isServiceActive by OverlayService.serviceRunningState.collectAsState()
+
             MaterialTheme(
                 colorScheme = darkColorScheme(
                     background = BgDark,
@@ -153,22 +161,19 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (::localTranslator.isInitialized) {
-            localTranslator.close()
-        }
+        localTranslator.close()
         super.onDestroy()
     }
 
     private fun refreshStates() {
         hasOverlayPermission = Settings.canDrawOverlays(this)
-        isServiceActive = OverlayService.isRunning
     }
 
     private fun checkOfflineModel() {
         lifecycleScope.launch {
             isModelReady = localTranslator.isModelDownloaded()
             if (isModelReady) {
-                statusMessage = "המנוע ההיברידי + גיבוי לא-מקוון מוכנים לפעולה"
+                statusMessage = "מנוע אנגלית–עברית הלא-מקוון מוכן לפעולה"
             }
         }
     }
@@ -182,7 +187,7 @@ class MainActivity : ComponentActivity() {
             isDownloadingModel = false
             if (result.isSuccess) {
                 isModelReady = true
-                statusMessage = "המודל הלא-מקוון מוכן — התרגום יעבוד גם ללא אינטרנט"
+                statusMessage = "המודל הלא-מקוון מוכן — התרגום עובד גם ללא אינטרנט"
             } else {
                 isModelReady = false
                 val err = result.exceptionOrNull()?.localizedMessage ?: "שגיאת רשת"
@@ -214,11 +219,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openOverlaySettings() {
-        val intent = Intent(
+        val packageIntent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
             Uri.parse("package:$packageName")
         )
-        startActivity(intent)
+        runCatching {
+            startActivity(packageIntent)
+        }.onFailure {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+            }
+        }
     }
 
     private fun startOverlayFlow() {
@@ -227,6 +238,22 @@ class MainActivity : ComponentActivity() {
             openOverlaySettings()
             return
         }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
+
+        launchScreenCapturePrompt()
+    }
+
+    private fun launchScreenCapturePrompt() {
         val projectionManager =
             getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
@@ -234,7 +261,6 @@ class MainActivity : ComponentActivity() {
 
     private fun stopOverlayService() {
         stopService(Intent(this, OverlayService::class.java))
-        isServiceActive = false
         statusMessage = "המתרגם הצף הופסק"
     }
 }
@@ -278,7 +304,7 @@ private fun MainScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "תרגום מהיר ומדויק אנגלית -> עברית עם התאמת צבעים מלאה",
+                text = "תרגום מהיר אנגלית -> עברית עם שמירה על פרטיות והתאמת צבעים",
                 color = TextSecondary,
                 fontSize = 14.sp
             )
@@ -348,14 +374,14 @@ private fun MainScreen(
             Spacer(modifier = Modifier.height(10.dp))
             SettingToggleRow(
                 title = "דלג על שמות אפליקציות ומותגים",
-                subtitle = "מונע תרגומים מילוליים כמו Gemini, Brave, Waze ו-Bit",
+                subtitle = "מונע תרגומים מילוליים כמו Gemini, Waze ו-Spotify",
                 checked = skipBrandNames,
                 onCheckedChange = onToggleSkipBrands
             )
             Spacer(modifier = Modifier.height(10.dp))
             SettingToggleRow(
-                title = "מצב לא-מקוון בלבד",
-                subtitle = "כבוי = תרגום עצבי מדויק ברשת + מעבר אוטומטי לאופליין",
+                title = "מצב לא-מקוון בלבד (פרטיות מרבית)",
+                subtitle = "פעיל = כל התרגום מתבצע מקומית במכשיר בלי שליחת תוכן מסך לרשת",
                 checked = offlineOnlyMode,
                 onCheckedChange = onToggleOfflineOnly
             )
@@ -399,7 +425,7 @@ private fun MainScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "2. גיבוי תרגום לא-מקוון (EN -> HE)",
+                    text = "2. מודל תרגום לא-מקוון (EN -> HE)",
                     color = TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
@@ -419,7 +445,7 @@ private fun MainScreen(
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "מאפשר תרגום גם כשאין אינטרנט או במצב טיסה. תרגומים שכבר בוצעו נשמרים מקומית למהירות מיידית.",
+                text = "הורדה חד-פעמית של מודל השפה למכשיר. לאחר ההורדה התרגום עובד מקומית ובמהירות ללא אינטרנט.",
                 color = TextSecondary,
                 fontSize = 13.sp
             )
