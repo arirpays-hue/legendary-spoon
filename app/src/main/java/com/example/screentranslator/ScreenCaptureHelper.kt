@@ -12,6 +12,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 class ScreenCaptureHelper(
@@ -27,6 +28,9 @@ class ScreenCaptureHelper(
     private var imageReader: ImageReader? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    @Volatile
+    private var latestBitmap: Bitmap? = null
+
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
             releaseDisplay()
@@ -40,6 +44,32 @@ class ScreenCaptureHelper(
         mediaProjection = projection
 
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        reader.setOnImageAvailableListener({ ir ->
+            val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
+            try {
+                val plane = image.planes[0]
+                val rowStride = plane.rowStride
+                val pixelStride = plane.pixelStride
+                val rowPadding = rowStride - pixelStride * width
+
+                val rawBitmap = Bitmap.createBitmap(
+                    width + rowPadding / pixelStride,
+                    height,
+                    Bitmap.Config.ARGB_8888
+                )
+                rawBitmap.copyPixelsFromBuffer(plane.buffer)
+                val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, width, height)
+                if (cropped != rawBitmap) {
+                    rawBitmap.recycle()
+                }
+                latestBitmap?.recycle()
+                latestBitmap = cropped
+            } catch (_: Exception) {
+                // Ignore transient frame copy errors
+            } finally {
+                image.close()
+            }
+        }, mainHandler)
         imageReader = reader
 
         virtualDisplay = projection.createVirtualDisplay(
@@ -54,40 +84,26 @@ class ScreenCaptureHelper(
         )
     }
 
-    suspend fun captureFrame(): Bitmap? = suspendCancellableCoroutine { cont ->
-        val reader = imageReader
-        if (reader == null) {
-            cont.resume(null)
-            return@suspendCancellableCoroutine
+    suspend fun captureFrame(): Bitmap? {
+        val immediate = latestBitmap
+        if (immediate != null && !immediate.isRecycled) {
+            return immediate.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        val image = reader.acquireLatestImage()
-        if (image == null) {
-            cont.resume(null)
-            return@suspendCancellableCoroutine
-        }
-
-        try {
-            val plane = image.planes[0]
-            val rowStride = plane.rowStride
-            val pixelStride = plane.pixelStride
-            val rowPadding = rowStride - pixelStride * width
-
-            val rawBitmap = Bitmap.createBitmap(
-                width + rowPadding / pixelStride,
-                height,
-                Bitmap.Config.ARGB_8888
-            )
-            rawBitmap.copyPixelsFromBuffer(plane.buffer)
-            val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, width, height)
-            if (cropped != rawBitmap) {
-                rawBitmap.recycle()
+        return withTimeoutOrNull(1500L) {
+            suspendCancellableCoroutine { cont ->
+                mainHandler.postDelayed(object : Runnable {
+                    override fun run() {
+                        if (!cont.isActive) return
+                        val bmp = latestBitmap
+                        if (bmp != null && !bmp.isRecycled) {
+                            cont.resume(bmp.copy(Bitmap.Config.ARGB_8888, false))
+                        } else {
+                            mainHandler.postDelayed(this, 100L)
+                        }
+                    }
+                }, 100L)
             }
-            cont.resume(cropped)
-        } catch (_: Exception) {
-            cont.resume(null)
-        } finally {
-            image.close()
         }
     }
 
@@ -96,6 +112,8 @@ class ScreenCaptureHelper(
         virtualDisplay = null
         imageReader?.close()
         imageReader = null
+        latestBitmap?.recycle()
+        latestBitmap = null
     }
 
     fun stop() {
