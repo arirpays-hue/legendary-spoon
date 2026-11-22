@@ -5,6 +5,14 @@ plugins {
 }
 
 val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+val signingStorePassword = System.getenv("SIGNING_STORE_PASSWORD").orEmpty()
+val signingKeyAlias = System.getenv("SIGNING_KEY_ALIAS").orEmpty()
+val signingKeyPassword = System.getenv("SIGNING_KEY_PASSWORD").orEmpty()
+val keystoreFile = file("app-signing.jks")
+val hasPersistentSigning = keystoreFile.exists() &&
+    signingStorePassword.isNotBlank() &&
+    signingKeyAlias.isNotBlank() &&
+    signingKeyPassword.isNotBlank()
 
 android {
     namespace = "com.example.screentranslator"
@@ -14,8 +22,8 @@ android {
         applicationId = "com.example.screentranslator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10 + runNumber
-        versionName = "1.2.$runNumber"
+        versionCode = 20 + runNumber
+        versionName = "1.3.$runNumber"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -23,13 +31,12 @@ android {
     }
 
     signingConfigs {
-        create("persistent") {
-            val ksFile = file("app-signing.jks")
-            if (ksFile.exists()) {
-                storeFile = ksFile
-                storePassword = "translator123"
-                keyAlias = "translator_key"
-                keyPassword = "translator123"
+        if (hasPersistentSigning) {
+            create("persistent") {
+                storeFile = keystoreFile
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
             }
         }
     }
@@ -42,14 +49,14 @@ android {
 
     buildTypes {
         debug {
-            if (file("app-signing.jks").exists()) {
+            if (hasPersistentSigning) {
                 signingConfig = signingConfigs.getByName("persistent")
             }
             isMinifyEnabled = false
             isShrinkResources = false
         }
         release {
-            if (file("app-signing.jks").exists()) {
+            if (hasPersistentSigning) {
                 signingConfig = signingConfigs.getByName("persistent")
             }
             isMinifyEnabled = true
