@@ -1,6 +1,6 @@
 package com.example.screentranslator
 
-import android.content.Context
+import android.util.LruCache
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -12,31 +12,36 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
-class OfflineEnHeTranslator(context: Context) {
+class OfflineEnHeTranslator {
 
-    private val appContext = context.applicationContext
-    private val cacheFile = File(appContext.filesDir, "en_he_translation_cache.json")
-    private val cache = ConcurrentHashMap<String, String>()
+    private val cacheLock = Any()
+    private val cache = LruCache<String, String>(2000)
+    private val modelMutex = Mutex()
 
     @Volatile
     private var translator: Translator? = null
+
     @Volatile
     private var isModelReady = false
-    @Volatile
-    private var cacheLoaded = false
 
     private val englishWordRegex = Regex("[A-Za-z]{2,}")
+    private val emailRegex = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+    private val cardNumberRegex = Regex("\\b(?:\\d[ -]*?){13,19}\\b")
+    private val sensitiveKeywordWithCodeRegex = Regex(
+        "(?i)\\b(otp|pin|cvv|password|passcode|token|secret)\\b.*\\b\\d{4,8}\\b|\\b\\d{4,8}\\b.*\\b(otp|pin|cvv|code)\\b"
+    )
     private val urlOrCodeFileRegex = Regex(
         ".*(://|www\\.|\\.(kt|java|xml|yml|yaml|json|gradle|apk|png|jpg|mp4)\\b|[A-Za-z0-9_]+/[A-Za-z0-9_]+/[A-Za-z0-9_]+).*",
         RegexOption.IGNORE_CASE
@@ -51,35 +56,11 @@ class OfflineEnHeTranslator(context: Context) {
         "volte", "4g", "5g", "lte", "usb", "adb", "apk", "pdf", "vpn"
     )
 
-    private fun ensureCacheLoaded() {
-        if (cacheLoaded) return
-        synchronized(this) {
-            if (cacheLoaded) return
-            runCatching {
-                if (cacheFile.exists()) {
-                    val json = JSONObject(cacheFile.readText())
-                    val keys = json.keys()
-                    while (keys.hasNext()) {
-                        val k = keys.next()
-                        val v = json.optString(k)
-                        if (k.isNotEmpty() && v.isNotEmpty()) {
-                            cache[k] = v
-                        }
-                    }
-                }
-            }
-            cacheLoaded = true
-        }
-    }
+    private fun getCached(key: String): String? = synchronized(cacheLock) { cache.get(key) }
 
-    private fun persistCache() {
-        runCatching {
-            val entries = if (cache.size > 4000) cache.entries.take(4000) else cache.entries
-            val json = JSONObject()
-            for ((k, v) in entries) {
-                json.put(k, v)
-            }
-            cacheFile.writeText(json.toString())
+    private fun putCached(key: String, value: String) {
+        synchronized(cacheLock) {
+            cache.put(key, value)
         }
     }
 
@@ -111,8 +92,9 @@ class OfflineEnHeTranslator(context: Context) {
         }
     }
 
-    suspend fun prepareModel(): Result<Unit> {
-        return try {
+    suspend fun prepareModel(): Result<Unit> = modelMutex.withLock {
+        if (isModelReady) return@withLock Result.success(Unit)
+        return@withLock try {
             val client = getOrCreateClient()
             val conditions = DownloadConditions.Builder().build()
             client.downloadModelIfNeeded(conditions).await()
@@ -148,12 +130,16 @@ class OfflineEnHeTranslator(context: Context) {
         return false
     }
 
+    private fun containsSensitiveData(text: String): Boolean {
+        return emailRegex.containsMatchIn(text) ||
+            cardNumberRegex.containsMatchIn(text) ||
+            sensitiveKeywordWithCodeRegex.containsMatchIn(text)
+    }
+
     suspend fun translateBatch(
         texts: List<String>,
-        offlineOnly: Boolean = false
+        offlineOnly: Boolean = true
     ): Map<String, String> = withContext(Dispatchers.IO) {
-        ensureCacheLoaded()
-
         val uniqueInputs = texts
             .map { it.replace('\n', ' ').trim() }
             .filter { it.isNotEmpty() }
@@ -161,48 +147,43 @@ class OfflineEnHeTranslator(context: Context) {
         if (uniqueInputs.isEmpty()) return@withContext emptyMap()
 
         val results = ConcurrentHashMap<String, String>()
-        val uncached = ArrayList<String>()
+        val uncachedOnline = ArrayList<String>()
+        val uncachedOfflineOnly = ArrayList<String>()
 
         for (item in uniqueInputs) {
-            val cached = cache[item]
+            val cached = getCached(item)
             if (cached != null) {
                 results[item] = cached
+            } else if (offlineOnly || containsSensitiveData(item)) {
+                uncachedOfflineOnly.add(item)
             } else {
-                uncached.add(item)
+                uncachedOnline.add(item)
             }
         }
 
-        if (uncached.isEmpty()) return@withContext results
-
-        val stillMissing = ArrayList<String>()
-
-        if (!offlineOnly) {
-            val onlineResolved = translateBatchOnline(uncached)
-            for (item in uncached) {
+        if (uncachedOnline.isNotEmpty()) {
+            val onlineResolved = translateBatchOnline(uncachedOnline)
+            for (item in uncachedOnline) {
                 val tr = onlineResolved[item]
                 if (!tr.isNullOrBlank()) {
                     results[item] = tr
-                    cache[item] = tr
+                    putCached(item, tr)
                 } else {
-                    stillMissing.add(item)
+                    uncachedOfflineOnly.add(item)
                 }
             }
-        } else {
-            stillMissing.addAll(uncached)
         }
 
-        if (stillMissing.isNotEmpty()) {
-            val offlineResolved = translateBatchOffline(stillMissing)
+        if (uncachedOfflineOnly.isNotEmpty()) {
+            val offlineResolved = translateBatchOffline(uncachedOfflineOnly)
             for ((src, tr) in offlineResolved) {
                 if (tr.isNotBlank()) {
                     results[src] = tr
-                    cache[src] = tr
+                    if (!containsSensitiveData(src)) {
+                        putCached(src, tr)
+                    }
                 }
             }
-        }
-
-        if (results.isNotEmpty()) {
-            persistCache()
         }
 
         results
@@ -210,7 +191,7 @@ class OfflineEnHeTranslator(context: Context) {
 
     suspend fun translateEnglishToHebrew(
         text: String,
-        offlineOnly: Boolean = false
+        offlineOnly: Boolean = true
     ): String {
         val clean = text.replace('\n', ' ').trim()
         if (clean.isEmpty()) return ""
@@ -278,14 +259,15 @@ class OfflineEnHeTranslator(context: Context) {
                 "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=iw&dt=t&q=$encoded"
             val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
-                connectTimeout = 3500
-                readTimeout = 4500
+                instanceFollowRedirects = false
+                connectTimeout = 3000
+                readTimeout = 4000
                 setRequestProperty("User-Agent", "Mozilla/5.0")
             }
 
             try {
                 if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
-                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                val body = readLimitedResponse(conn, maxBytes = 65_536) ?: return null
                 val root = JSONArray(body)
                 val segments = root.optJSONArray(0) ?: return null
                 val sb = StringBuilder()
@@ -303,6 +285,22 @@ class OfflineEnHeTranslator(context: Context) {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun readLimitedResponse(conn: HttpURLConnection, maxBytes: Int): String? {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        var total = 0
+        conn.inputStream.use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                total += read
+                if (total > maxBytes) return null
+                out.write(buffer, 0, read)
+            }
+        }
+        return out.toString(Charsets.UTF_8.name())
     }
 
     private suspend fun translateBatchOffline(items: List<String>): Map<String, String> = coroutineScope {
@@ -328,8 +326,15 @@ class OfflineEnHeTranslator(context: Context) {
         out
     }
 
+    fun clearCache() {
+        synchronized(cacheLock) {
+            cache.evictAll()
+        }
+    }
+
     fun close() {
-        translator?.close()
+        clearCache()
+        runCatching { translator?.close() }
         translator = null
         isModelReady = false
     }
