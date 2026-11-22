@@ -43,6 +43,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
@@ -134,7 +135,7 @@ class OverlayService : Service() {
         if (!helper.start()) {
             Toast.makeText(this, "שגיאה בהפעלת לכידת מסך", Toast.LENGTH_SHORT).show()
             stopSelf()
-            return START_STICKY
+            return START_NOT_STICKY
         }
         captureHelper = helper
 
@@ -198,6 +199,7 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
+            alpha = 1.0f
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -220,7 +222,7 @@ class OverlayService : Service() {
         }
 
         edgeHandle = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(20), dp(62))
+            layoutParams = LinearLayout.LayoutParams(dp(22), dp(64))
             addView(edgeIndicator)
         }
 
@@ -230,7 +232,7 @@ class OverlayService : Service() {
             visibility = View.GONE
             setPadding(dp(8), dp(8), dp(8), dp(8))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F0141821"))
+                setColor(Color.parseColor("#F5141821"))
                 cornerRadius = dp(18).toFloat()
                 setStroke(dp(1), Color.parseColor("#33FFFFFF"))
             }
@@ -279,7 +281,8 @@ class OverlayService : Service() {
         menuContainer.addView(clearButton)
         menuContainer.addView(closeButton)
 
-        rebuildControlOrder()
+        // Initial order for right-docked edge
+        applyEdgeStyleAndOrder()
 
         controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -299,17 +302,17 @@ class OverlayService : Service() {
         var touchDownX = 0f
         var touchDownY = 0f
         var isDragging = false
-        val touchSlop = dp(8)
+        val touchSlop = dp(10)
 
         edgeHandle.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    val currentWidth = rootControlContainer.width.coerceAtLeast(dp(20))
-                    if (isDockedRight) {
-                        controlParams.gravity = Gravity.TOP or Gravity.LEFT
-                        controlParams.x = (screenWidth - currentWidth).coerceAtLeast(0)
+                    val currentWidth = rootControlContainer.width.coerceAtLeast(dp(22))
+                    startX = if (isDockedRight) {
+                        (screenWidth - currentWidth).coerceAtLeast(0)
+                    } else {
+                        controlParams.x
                     }
-                    startX = controlParams.x
                     startY = controlParams.y
                     touchDownX = event.rawX
                     touchDownY = event.rawY
@@ -319,26 +322,40 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - touchDownX).toInt()
                     val dy = (event.rawY - touchDownY).toInt()
-                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
+                    if (!isDragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
                         isDragging = true
+                        controlParams.gravity = Gravity.TOP or Gravity.LEFT
                     }
                     if (isDragging) {
                         val minY = statusBarHeight + dp(12)
                         val maxY = (screenHeight - navBarHeight - dp(80)).coerceAtLeast(minY)
-                        controlParams.x = (startX + dx).coerceIn(0, screenWidth - dp(20))
+                        controlParams.x = (startX + dx).coerceIn(0, (screenWidth - dp(22)).coerceAtLeast(0))
                         controlParams.y = (startY + dy).coerceIn(minY, maxY)
-                        runCatching { windowManager.updateViewLayout(rootControlContainer, controlParams) }
+                        safeUpdateControlLayout()
                     }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_UP -> {
                     if (!isDragging) {
-                        snapToNearestEdge()
+                        // Safe toggle without detaching edgeHandle during touch dispatch
                         setMenuExpanded(!isMenuExpanded)
                     } else {
                         val center = controlParams.x + (rootControlContainer.width / 2)
-                        isDockedRight = center >= (screenWidth / 2)
-                        snapToNearestEdge()
+                        val newDockedRight = center >= (screenWidth / 2)
+                        val sideChanged = newDockedRight != isDockedRight
+                        isDockedRight = newDockedRight
+                        rootControlContainer.post {
+                            if (sideChanged) {
+                                applyEdgeStyleAndOrder()
+                            }
+                            dockToCurrentEdge()
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (isDragging) {
+                        rootControlContainer.post { dockToCurrentEdge() }
                     }
                     true
                 }
@@ -349,19 +366,23 @@ class OverlayService : Service() {
         windowManager.addView(rootControlContainer, controlParams)
     }
 
+    private fun safeUpdateControlLayout() {
+        if (::rootControlContainer.isInitialized && rootControlContainer.isAttachedToWindow) {
+            runCatching { windowManager.updateViewLayout(rootControlContainer, controlParams) }
+        }
+    }
+
     @SuppressLint("RtlHardcoded")
-    private fun snapToNearestEdge() {
-        rebuildControlOrder()
+    private fun dockToCurrentEdge() {
         controlParams.gravity = Gravity.TOP or if (isDockedRight) Gravity.RIGHT else Gravity.LEFT
         controlParams.x = 0
         val minY = statusBarHeight + dp(12)
         val maxY = (screenHeight - navBarHeight - dp(80)).coerceAtLeast(minY)
         controlParams.y = controlParams.y.coerceIn(minY, maxY)
-        runCatching { windowManager.updateViewLayout(rootControlContainer, controlParams) }
+        safeUpdateControlLayout()
     }
 
-    private fun rebuildControlOrder() {
-        rootControlContainer.removeAllViews()
+    private fun applyEdgeStyleAndOrder() {
         val radius = dp(14).toFloat()
         val radii = if (isDockedRight) {
             floatArrayOf(radius, radius, 0f, 0f, 0f, 0f, radius, radius)
@@ -370,11 +391,17 @@ class OverlayService : Service() {
         }
 
         edgeHandle.background = GradientDrawable().apply {
-            setColor(Color.parseColor("#A6141821"))
+            setColor(Color.parseColor("#B8141821"))
             cornerRadii = radii
-            setStroke(dp(1), Color.parseColor("#38FFFFFF"))
+            setStroke(dp(1), Color.parseColor("#44FFFFFF"))
         }
 
+        val desiredFirst: View = if (isDockedRight) menuContainer else edgeHandle
+        if (rootControlContainer.childCount == 2 && rootControlContainer.getChildAt(0) === desiredFirst) {
+            return
+        }
+
+        rootControlContainer.removeAllViews()
         if (isDockedRight) {
             rootControlContainer.addView(menuContainer)
             rootControlContainer.addView(edgeHandle)
@@ -387,7 +414,7 @@ class OverlayService : Service() {
     private fun setMenuExpanded(expanded: Boolean) {
         isMenuExpanded = expanded
         menuContainer.visibility = if (expanded) View.VISIBLE else View.GONE
-        snapToNearestEdge()
+        dockToCurrentEdge()
     }
 
     private fun updateIndicatorColor(hex: String) {
@@ -407,7 +434,7 @@ class OverlayService : Service() {
                 cornerRadius = dp(12).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
-                dp(122),
+                dp(124),
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 topMargin = dp(3)
@@ -489,7 +516,6 @@ class OverlayService : Service() {
     }
 
     private suspend fun waitForScreenToSettle() {
-        var stableTicks = 0
         repeat(4) {
             delay(200L)
             val probe = captureHelper?.captureFrame(waitForFresh = true) ?: return
@@ -501,11 +527,22 @@ class OverlayService : Service() {
                     bottomInset = navBarHeight
                 )
                 if (res is DiffResult.Unchanged) {
-                    stableTicks++
-                    if (stableTicks >= 1) return
+                    return
                 }
             } finally {
                 probe.recycle()
+            }
+        }
+    }
+
+    private suspend fun translateBlocksFiltered(blocks: List<RecognizedBlock>): List<RecognizedBlock> {
+        return blocks.mapNotNull { block ->
+            val translated = offlineTranslator.translateEnglishToHebrew(block.text)
+            val hasHebrew = translated.any { it in '\u0590'..'\u05FF' }
+            if (hasHebrew && !translated.equals(block.text, ignoreCase = true)) {
+                block.copy(translatedText = translated)
+            } else {
+                null
             }
         }
     }
@@ -535,7 +572,7 @@ class OverlayService : Service() {
             var freshFrame: Bitmap? = null
             val sourceBitmap = if (overlapping.isNotEmpty()) {
                 overlayCanvasView.updateBlocks(preserved)
-                delay(120L)
+                delay(140L)
                 freshFrame = captureHelper?.captureFrame(waitForFresh = true)
                 freshFrame ?: currentFrame
             } else {
@@ -557,12 +594,7 @@ class OverlayService : Service() {
                         maxBottomY = screenHeight - navBarHeight,
                         excludeRect = getControlScreenRect()
                     )
-
-                    val translatedNew = detected.mapNotNull { block ->
-                        val translated = offlineTranslator.translateEnglishToHebrew(block.text)
-                        if (translated.isNotEmpty()) block.copy(translatedText = translated) else null
-                    }
-
+                    val translatedNew = translateBlocksFiltered(detected)
                     overlayCanvasView.updateBlocks(preserved + translatedNew)
                 } finally {
                     cropped.recycle()
@@ -571,7 +603,7 @@ class OverlayService : Service() {
                 freshFrame?.recycle()
             }
         } catch (_: Exception) {
-            // Keep existing blocks intact on transient partial-OCR error
+            // Keep existing blocks intact on transient error
         } finally {
             updateIndicatorColor(if (isAutoMode) "#22C55E" else "#3B82F6")
             isBusy = false
@@ -588,7 +620,7 @@ class OverlayService : Service() {
             val hadBlocks = overlayCanvasView.hasBlocks()
             if (hideOverlayFirst && hadBlocks) {
                 overlayCanvasView.visibility = View.INVISIBLE
-                delay(140L)
+                delay(160L)
             }
 
             val frame = captureHelper?.captureFrame(waitForFresh = true)
@@ -612,19 +644,11 @@ class OverlayService : Service() {
                     excludeRect = getControlScreenRect()
                 )
 
-                if (blocks.isEmpty()) {
-                    overlayCanvasView.updateBlocks(emptyList())
-                    if (showFeedback) {
-                        Toast.makeText(this, "לא נמצא טקסט באנגלית על המסך", Toast.LENGTH_SHORT).show()
-                    }
-                    return
-                }
-
-                val translatedBlocks = blocks.mapNotNull { block ->
-                    val translated = offlineTranslator.translateEnglishToHebrew(block.text)
-                    if (translated.isNotEmpty()) block.copy(translatedText = translated) else null
-                }
+                val translatedBlocks = translateBlocksFiltered(blocks)
                 overlayCanvasView.updateBlocks(translatedBlocks)
+                if (translatedBlocks.isEmpty() && showFeedback) {
+                    Toast.makeText(this, "לא נמצא טקסט באנגלית לתרגום", Toast.LENGTH_SHORT).show()
+                }
             } finally {
                 frame.recycle()
             }
@@ -846,9 +870,9 @@ class OverlayService : Service() {
             blocks = newBlocks
             renderedRects = newBlocks.map {
                 Rect(
-                    (it.bounds.left - 12).coerceAtLeast(0),
+                    (it.bounds.left - 14).coerceAtLeast(0),
                     (it.bounds.top - 10).coerceAtLeast(0),
-                    it.bounds.right + 12,
+                    it.bounds.right + 14,
                     it.bounds.bottom + 10
                 )
             }
@@ -857,90 +881,122 @@ class OverlayService : Service() {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val padX = 10f
-            val padY = 6f
+            val padX = 12f
+            val padY = 8f
             val drawnRects = ArrayList<Rect>(blocks.size)
 
             for (block in blocks) {
                 val text = block.translatedText
                 if (text.isEmpty()) continue
 
-                val origW = block.bounds.width().coerceAtLeast(20)
-                val origH = block.bounds.height().coerceAtLeast(20)
-                val isCompactLabel = block.lineCount == 1 && origW < (width * 0.52f)
+                val isRotated = abs(block.angleDegrees) >= 2.5f
+                val baseW = if (isRotated) block.orientedWidth else block.bounds.width()
+                val baseH = if (isRotated) block.orientedHeight else block.bounds.height()
+                val origW = baseW.coerceAtLeast(24)
+                val origH = baseH.coerceAtLeast(20)
+                val isCompactLabel = block.lineCount == 1 && origW < (width * 0.54f)
 
                 textPaint.color = block.textColor
                 val avgLineHeight = origH.toFloat() / block.lineCount.coerceAtLeast(1)
-                var fontSize = (avgLineHeight * 0.78f).coerceIn(22f, 52f)
+                var fontSize = (avgLineHeight * 0.80f).coerceIn(20f, 52f)
                 textPaint.textSize = fontSize
 
                 val targetRect: RectF
                 val layout: StaticLayout
 
                 if (isCompactLabel) {
-                    val measuredWidth = textPaint.measureText(text)
-                    val maxAllowedWidth = max(origW * 1.35f, width * 0.28f).coerceAtMost(width * 0.48f)
-                    val minCoverWidth = origW.toFloat()
-                    var desiredTextWidth = max(minCoverWidth, measuredWidth)
+                    val maxAllowedWidth = max(origW * 1.45f, width * 0.30f).coerceAtMost(width * 0.52f)
+                    var measuredWidth = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
 
-                    if (desiredTextWidth > maxAllowedWidth) {
-                        val scale = maxAllowedWidth / desiredTextWidth
-                        fontSize = (fontSize * scale).coerceAtLeast(20f)
+                    while (measuredWidth > maxAllowedWidth && fontSize > 16f) {
+                        fontSize -= 1.5f
                         textPaint.textSize = fontSize
-                        desiredTextWidth = max(minCoverWidth, min(textPaint.measureText(text), maxAllowedWidth))
+                        measuredWidth = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
                     }
 
-                    val layoutWidth = desiredTextWidth.toInt().coerceAtLeast(24)
+                    val layoutWidth = max(origW.toFloat(), min(measuredWidth, maxAllowedWidth))
+                        .toInt()
+                        .coerceAtLeast(28)
                     layout = buildLayout(text, layoutWidth, fontSize, Layout.Alignment.ALIGN_CENTER)
 
-                    val boxW = layoutWidth + padX * 2f
-                    val boxH = max(origH.toFloat(), layout.height.toFloat()) + padY * 2f
+                    val boxW = max(origW + padX * 2f, layoutWidth + padX * 2f)
+                    val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
                     val centerX = block.bounds.exactCenterX()
                     val centerY = block.bounds.exactCenterY()
 
-                    var left = centerX - (boxW / 2f)
-                    var right = centerX + (boxW / 2f)
-                    if (left < 6f) {
-                        right += (6f - left)
-                        left = 6f
+                    if (isRotated) {
+                        targetRect = RectF(
+                            centerX - boxW / 2f,
+                            centerY - boxH / 2f,
+                            centerX + boxW / 2f,
+                            centerY + boxH / 2f
+                        )
+                    } else {
+                        var left = centerX - (boxW / 2f)
+                        var right = centerX + (boxW / 2f)
+                        if (left < 6f) {
+                            right += (6f - left)
+                            left = 6f
+                        }
+                        if (right > width - 6f) {
+                            left -= (right - (width - 6f))
+                            right = width - 6f
+                        }
+                        left = left.coerceAtLeast(6f)
+                        val top = (centerY - boxH / 2f).coerceAtLeast(6f)
+                        val bottom = (top + boxH).coerceAtMost(height - 6f)
+                        targetRect = RectF(left, top, right, bottom)
                     }
-                    if (right > width - 6f) {
-                        left -= (right - (width - 6f))
-                        right = width - 6f
-                    }
-                    left = left.coerceAtLeast(6f)
-                    val top = (centerY - boxH / 2f).coerceAtLeast(6f)
-                    val bottom = (top + boxH).coerceAtMost(height - 6f)
-                    targetRect = RectF(left, top, right, bottom)
                 } else {
-                    val left = (block.bounds.left - padX).coerceAtLeast(6f)
-                    val right = (block.bounds.right + padX).coerceAtMost(width - 6f)
-                    val layoutWidth = (right - left - padX * 2f).toInt().coerceAtLeast(40)
+                    val left = if (isRotated) {
+                        block.bounds.exactCenterX() - origW / 2f - padX
+                    } else {
+                        (block.bounds.left - padX).coerceAtLeast(6f)
+                    }
+                    val right = if (isRotated) {
+                        block.bounds.exactCenterX() + origW / 2f + padX
+                    } else {
+                        (block.bounds.right + padX).coerceAtMost(width - 6f)
+                    }
+                    val layoutWidth = (right - left - padX * 2f).toInt().coerceAtLeast(48)
 
                     var fittedLayout = buildLayout(text, layoutWidth, fontSize, Layout.Alignment.ALIGN_NORMAL)
-                    while (fittedLayout.height > origH + padY && fontSize > 20f) {
+                    while (fittedLayout.height > origH + padY && fontSize > 16f) {
                         fontSize -= 1.5f
                         fittedLayout = buildLayout(text, layoutWidth, fontSize, Layout.Alignment.ALIGN_NORMAL)
                     }
                     layout = fittedLayout
 
-                    val top = (block.bounds.top - padY).coerceAtLeast(6f)
                     val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
-                    val bottom = (top + boxH).coerceAtMost(height - 6f)
+                    val top = if (isRotated) {
+                        block.bounds.exactCenterY() - boxH / 2f
+                    } else {
+                        (block.bounds.top - padY).coerceAtLeast(6f)
+                    }
+                    val bottom = if (isRotated) {
+                        top + boxH
+                    } else {
+                        (top + boxH).coerceAtMost(height - 6f)
+                    }
                     targetRect = RectF(left, top, right, bottom)
                 }
 
-                boxPaint.color = block.bgColor
-                borderPaint.color = if (block.textColor == Color.parseColor("#111827")) {
-                    Color.parseColor("#24000000")
+                // Force 100% opaque fill (alpha = 255) so original text never bleeds through
+                boxPaint.color = block.bgColor or -0x1000000
+                borderPaint.color = if (block.textColor == Color.WHITE) {
+                    Color.parseColor("#33FFFFFF")
                 } else {
-                    Color.parseColor("#26FFFFFF")
+                    Color.parseColor("#2A000000")
+                }
+
+                canvas.save()
+                if (isRotated) {
+                    canvas.rotate(block.angleDegrees, targetRect.centerX(), targetRect.centerY())
                 }
 
                 canvas.drawRoundRect(targetRect, 12f, 12f, boxPaint)
                 canvas.drawRoundRect(targetRect, 12f, 12f, borderPaint)
 
-                canvas.save()
                 val textLeft = targetRect.left + (targetRect.width() - layout.width) / 2f
                 val textTop = targetRect.top + (targetRect.height() - layout.height) / 2f
                 canvas.translate(textLeft, textTop)
@@ -949,10 +1005,10 @@ class OverlayService : Service() {
 
                 drawnRects.add(
                     Rect(
-                        targetRect.left.toInt(),
-                        targetRect.top.toInt(),
-                        targetRect.right.toInt(),
-                        targetRect.bottom.toInt()
+                        min(targetRect.left.toInt(), block.bounds.left),
+                        min(targetRect.top.toInt(), block.bounds.top),
+                        max(targetRect.right.toInt(), block.bounds.right),
+                        max(targetRect.bottom.toInt(), block.bounds.bottom)
                     )
                 )
             }
