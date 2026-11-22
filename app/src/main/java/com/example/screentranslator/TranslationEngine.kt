@@ -1,69 +1,66 @@
 package com.example.screentranslator
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
+import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.tasks.await
 import java.util.concurrent.ConcurrentHashMap
 
-class TranslationEngine {
+class OfflineEnHeTranslator {
     private val cache = ConcurrentHashMap<String, String>()
+    private var translator: Translator? = null
+    private var isModelReady = false
 
-    suspend fun translate(
-        text: String,
-        targetLang: String = "iw",
-        sourceLang: String = "auto"
-    ): String {
+    suspend fun prepareModel(requireWifiOnly: Boolean = false): Boolean {
+        val options = TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.ENGLISH)
+            .setTargetLanguage(TranslateLanguage.HEBREW)
+            .build()
+
+        val client = Translation.getClient(options)
+        translator = client
+
+        return try {
+            val conditionsBuilder = DownloadConditions.Builder()
+            if (requireWifiOnly) {
+                conditionsBuilder.requireWifi()
+            }
+            client.downloadModelIfNeeded(conditionsBuilder.build()).await()
+            isModelReady = true
+            true
+        } catch (_: Exception) {
+            isModelReady = false
+            false
+        }
+    }
+
+    suspend fun translateEnglishToHebrew(text: String): String {
         val clean = text.trim()
         if (clean.isEmpty()) return ""
 
-        val cacheKey = "$sourceLang->$targetLang:$clean"
-        cache[cacheKey]?.let { return it }
+        cache[clean]?.let { return it }
 
-        val translated = withContext(Dispatchers.IO) {
-            fetchTranslation(clean, sourceLang, targetLang)
+        val client = translator ?: return clean
+        if (!isModelReady) {
+            val ready = prepareModel(requireWifiOnly = false)
+            if (!ready) return clean
         }
-        cache[cacheKey] = translated
-        return translated
-    }
 
-    private fun fetchTranslation(text: String, sourceLang: String, targetLang: String): String {
         return try {
-            val encoded = URLEncoder.encode(text, "UTF-8")
-            val urlStr =
-                "https://translate.googleapis.com/translate_a/single?client=gtx&sl=$sourceLang&tl=$targetLang&dt=t&q=$encoded"
-            val connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 5000
-                readTimeout = 5000
-                setRequestProperty("User-Agent", "Mozilla/5.0")
-            }
-
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val body = connection.inputStream.bufferedReader().use { it.readText() }
-                val root = JSONArray(body)
-                val sentences = root.optJSONArray(0) ?: return text
-                val sb = StringBuilder()
-                for (i in 0 until sentences.length()) {
-                    val part = sentences.optJSONArray(i)
-                    val chunk = part?.optString(0)
-                    if (!chunk.isNullOrEmpty() && chunk != "null") {
-                        sb.append(chunk)
-                    }
-                }
-                val result = sb.toString().trim()
-                if (result.isNotEmpty()) result else text
-            } else {
-                text
-            }
+            val result = client.translate(clean).await().trim()
+            val finalText = if (result.isNotEmpty()) result else clean
+            cache[clean] = finalText
+            finalText
         } catch (_: Exception) {
-            text
+            clean
         }
     }
 
-    fun clearCache() {
-        cache.clear()
+    fun close() {
+        translator?.close()
+        translator = null
+        isModelReady = false
     }
 }
