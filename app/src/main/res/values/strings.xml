@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">Screen Translator</string>
-    <string name="overlay_channel_name">Screen Translation Service</string>
+    <string name="app_name">מתרגם מסך</string>
+    <string name="overlay_channel_name">שירות תרגום מסך</string>
 </resources>
