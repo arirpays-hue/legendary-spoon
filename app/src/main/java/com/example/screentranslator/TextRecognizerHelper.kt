@@ -9,10 +9,8 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
@@ -49,7 +47,8 @@ class TextRecognizerHelper {
         maxBottomY: Int = Int.MAX_VALUE,
         excludeRect: Rect? = null
     ): List<RecognizedBlock> {
-        val visionText = processVisionText(bitmap)
+        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        val visionText = recognizer.process(inputImage).await()
         return withContext(Dispatchers.Default) {
             extractBlocks(
                 bitmap = bitmap,
@@ -65,11 +64,8 @@ class TextRecognizerHelper {
         }
     }
 
-    private suspend fun processVisionText(bitmap: Bitmap): Text = suspendCoroutine { cont ->
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
-        recognizer.process(inputImage)
-            .addOnSuccessListener { cont.resume(it) }
-            .addOnFailureListener { cont.resumeWithException(it) }
+    fun close() {
+        runCatching { recognizer.close() }
     }
 
     private fun extractBlocks(
@@ -143,10 +139,7 @@ class TextRecognizerHelper {
 
     private fun shouldSplitIntoLines(lines: List<Text.Line>): Boolean {
         if (lines.size <= 1) return false
-
-        // Split if mixed Hebrew/English lines exist in the same block
-        val hasHebrewLine = lines.any { hebrewRegex.containsMatchIn(it.text) }
-        if (hasHebrewLine) return true
+        if (lines.any { hebrewRegex.containsMatchIn(it.text) }) return true
 
         val boxes = lines.mapNotNull { it.boundingBox }
         if (boxes.size != lines.size) return true
