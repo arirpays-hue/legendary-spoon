@@ -68,16 +68,18 @@ private val TextSecondary = Color(0xFF94A3B8)
 
 class MainActivity : ComponentActivity() {
 
-    private val localTranslator = OfflineEnHeTranslator()
+    private lateinit var localTranslator: OfflineEnHeTranslator
 
     private var hasOverlayPermission by mutableStateOf(false)
     private var isModelReady by mutableStateOf(false)
     private var isDownloadingModel by mutableStateOf(false)
     private var isServiceActive by mutableStateOf(false)
-    private var startInAutoMode by mutableStateOf(false)
-    private var statusMessage by mutableStateOf("מוכן להגדרה")
+    private var startInAutoMode by mutableStateOf(true)
+    private var offlineOnlyMode by mutableStateOf(false)
+    private var skipBrandNames by mutableStateOf(true)
+    private var statusMessage by mutableStateOf("מוכן להפעלה")
 
-    private var sampleInput by mutableStateOf("Hello, this is an offline screen translator.")
+    private var sampleInput by mutableStateOf("Settings will be saved automatically when you exit.")
     private var sampleOutput by mutableStateOf("")
     private var isTestingTranslation by mutableStateOf(false)
 
@@ -88,6 +90,8 @@ class MainActivity : ComponentActivity() {
                     putExtra(OverlayService.EXTRA_RESULT_CODE, result.resultCode)
                     putExtra(OverlayService.EXTRA_DATA_INTENT, result.data)
                     putExtra(OverlayService.EXTRA_AUTO_MODE, startInAutoMode)
+                    putExtra(OverlayService.EXTRA_OFFLINE_ONLY, offlineOnlyMode)
+                    putExtra(OverlayService.EXTRA_SKIP_BRANDS, skipBrandNames)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     startForegroundService(serviceIntent)
@@ -103,6 +107,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        localTranslator = OfflineEnHeTranslator(applicationContext)
         refreshStates()
         checkOfflineModel()
 
@@ -121,14 +126,18 @@ class MainActivity : ComponentActivity() {
                         isDownloadingModel = isDownloadingModel,
                         isServiceActive = isServiceActive,
                         startInAutoMode = startInAutoMode,
+                        offlineOnlyMode = offlineOnlyMode,
+                        skipBrandNames = skipBrandNames,
                         statusMessage = statusMessage,
                         sampleInput = sampleInput,
                         sampleOutput = sampleOutput,
                         isTestingTranslation = isTestingTranslation,
                         onSampleInputChange = { sampleInput = it },
                         onToggleAutoMode = { startInAutoMode = it },
+                        onToggleOfflineOnly = { offlineOnlyMode = it },
+                        onToggleSkipBrands = { skipBrandNames = it },
                         onDownloadModelClick = { downloadOfflineModel() },
-                        onTestTranslationClick = { testOfflineTranslation() },
+                        onTestTranslationClick = { testTranslation() },
                         onGrantOverlayClick = { openOverlaySettings() },
                         onStartOverlayClick = { startOverlayFlow() },
                         onStopOverlayClick = { stopOverlayService() }
@@ -144,7 +153,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        localTranslator.close()
+        if (::localTranslator.isInitialized) {
+            localTranslator.close()
+        }
         super.onDestroy()
     }
 
@@ -157,7 +168,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             isModelReady = localTranslator.isModelDownloaded()
             if (isModelReady) {
-                statusMessage = "מנוע אנגלית–עברית הלא-מקוון מוכן לפעולה"
+                statusMessage = "המנוע ההיברידי + גיבוי לא-מקוון מוכנים לפעולה"
             }
         }
     }
@@ -165,13 +176,13 @@ class MainActivity : ComponentActivity() {
     private fun downloadOfflineModel() {
         if (isDownloadingModel) return
         isDownloadingModel = true
-        statusMessage = "מוריד מודל תרגום אנגלית–עברית למכשיר (כ-30MB)..."
+        statusMessage = "מוריד מודל לא-מקוון אנגלית–עברית למכשיר..."
         lifecycleScope.launch {
             val result = localTranslator.prepareModel()
             isDownloadingModel = false
             if (result.isSuccess) {
                 isModelReady = true
-                statusMessage = "המודל הורד בהצלחה — מעכשיו התרגום עובד ללא אינטרנט"
+                statusMessage = "המודל הלא-מקוון מוכן — התרגום יעבוד גם ללא אינטרנט"
             } else {
                 isModelReady = false
                 val err = result.exceptionOrNull()?.localizedMessage ?: "שגיאת רשת"
@@ -180,11 +191,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun testOfflineTranslation() {
+    private fun testTranslation() {
         if (isTestingTranslation) return
         isTestingTranslation = true
         lifecycleScope.launch {
-            if (!isModelReady) {
+            if (offlineOnlyMode && !isModelReady) {
                 val res = localTranslator.prepareModel()
                 if (res.isFailure) {
                     sampleOutput = "יש להוריד קודם את המודל הלא-מקוון"
@@ -193,7 +204,10 @@ class MainActivity : ComponentActivity() {
                 }
                 isModelReady = true
             }
-            val translated = localTranslator.translateEnglishToHebrew(sampleInput)
+            val translated = localTranslator.translateEnglishToHebrew(
+                text = sampleInput,
+                offlineOnly = offlineOnlyMode
+            )
             sampleOutput = if (translated.isNotEmpty()) translated else "לא נמצא טקסט באנגלית לתרגום"
             isTestingTranslation = false
         }
@@ -232,12 +246,16 @@ private fun MainScreen(
     isDownloadingModel: Boolean,
     isServiceActive: Boolean,
     startInAutoMode: Boolean,
+    offlineOnlyMode: Boolean,
+    skipBrandNames: Boolean,
     statusMessage: String,
     sampleInput: String,
     sampleOutput: String,
     isTestingTranslation: Boolean,
     onSampleInputChange: (String) -> Unit,
     onToggleAutoMode: (Boolean) -> Unit,
+    onToggleOfflineOnly: (Boolean) -> Unit,
+    onToggleSkipBrands: (Boolean) -> Unit,
     onDownloadModelClick: () -> Unit,
     onTestTranslationClick: () -> Unit,
     onGrantOverlayClick: () -> Unit,
@@ -252,7 +270,6 @@ private fun MainScreen(
             .padding(horizontal = 20.dp, vertical = 28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Header
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 text = "מתרגם מסך",
@@ -261,13 +278,12 @@ private fun MainScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "תרגום אנגלית לעברית בזמן אמת — ללא אינטרנט",
+                text = "תרגום מהיר ומדויק אנגלית -> עברית עם התאמת צבעים מלאה",
                 color = TextSecondary,
                 fontSize = 14.sp
             )
         }
 
-        // Status Banner
         SectionCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -293,7 +309,6 @@ private fun MainScreen(
             )
         }
 
-        // Step 1: Offline Model
         SectionCard {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -301,67 +316,7 @@ private fun MainScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
-                    text = "1. מנוע תרגום לא-מקוון (EN -> HE)",
-                    color = TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                StatusDotBadge(
-                    label = when {
-                        isDownloadingModel -> "מוריד..."
-                        isModelReady -> "מוכן"
-                        else -> "לא הורד"
-                    },
-                    color = when {
-                        isDownloadingModel -> AccentAmber
-                        isModelReady -> AccentGreen
-                        else -> AccentAmber
-                    }
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "הורדה חד-פעמית של מודל השפה למכשיר. לאחר ההורדה התרגום עובד מקומית גם במצב טיסה.",
-                color = TextSecondary,
-                fontSize = 13.sp
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Button(
-                onClick = onDownloadModelClick,
-                enabled = !isDownloadingModel,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isModelReady) Color(0xFF232936) else AccentBlue
-                )
-            ) {
-                if (isDownloadingModel) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        color = Color.White,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("מוריד מודל...", color = Color.White)
-                } else {
-                    Text(
-                        text = if (isModelReady) "אמת מודל לא-מקוון" else "הורד מודל אנגלית–עברית",
-                        color = Color.White,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Step 2: Overlay Permission & Launch
-        SectionCard {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "2. תצוגה מעל אפליקציות והפעלה",
+                    text = "1. הפעלה והגדרות תרגום",
                     color = TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
@@ -384,30 +339,26 @@ private fun MainScreen(
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "מצב תרגום אוטומטי",
-                        color = TextPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "סריקה מתמשכת כל 2 שניות במקום לחיצה ידנית",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                }
-                Switch(
-                    checked = startInAutoMode,
-                    onCheckedChange = onToggleAutoMode,
-                    colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
-                )
-            }
+            SettingToggleRow(
+                title = "זיהוי שינויים אוטומטי",
+                subtitle = "מתרגם אוטומטית רק אזורים שהשתנו ומנקה במעבר מסך",
+                checked = startInAutoMode,
+                onCheckedChange = onToggleAutoMode
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            SettingToggleRow(
+                title = "דלג על שמות אפליקציות ומותגים",
+                subtitle = "מונע תרגומים מילוליים כמו Gemini, Brave, Waze ו-Bit",
+                checked = skipBrandNames,
+                onCheckedChange = onToggleSkipBrands
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            SettingToggleRow(
+                title = "מצב לא-מקוון בלבד",
+                subtitle = "כבוי = תרגום עצבי מדויק ברשת + מעבר אוטומטי לאופליין",
+                checked = offlineOnlyMode,
+                onCheckedChange = onToggleOfflineOnly
+            )
 
             Spacer(modifier = Modifier.height(14.dp))
             Row(
@@ -441,10 +392,68 @@ private fun MainScreen(
             }
         }
 
-        // Step 3: Quick Offline Test
+        SectionCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "2. גיבוי תרגום לא-מקוון (EN -> HE)",
+                    color = TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                StatusDotBadge(
+                    label = when {
+                        isDownloadingModel -> "מוריד..."
+                        isModelReady -> "מוכן"
+                        else -> "לא הורד"
+                    },
+                    color = when {
+                        isDownloadingModel -> AccentAmber
+                        isModelReady -> AccentGreen
+                        else -> AccentAmber
+                    }
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "מאפשר תרגום גם כשאין אינטרנט או במצב טיסה. תרגומים שכבר בוצעו נשמרים מקומית למהירות מיידית.",
+                color = TextSecondary,
+                fontSize = 13.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = onDownloadModelClick,
+                enabled = !isDownloadingModel,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isModelReady) Color(0xFF232936) else AccentBlue
+                )
+            ) {
+                if (isDownloadingModel) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("מוריד מודל...", color = Color.White)
+                } else {
+                    Text(
+                        text = if (isModelReady) "אמת מודל לא-מקוון" else "הורד מודל לא-מקוון",
+                        color = Color.White,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
         SectionCard {
             Text(
-                text = "3. בדיקת מנוע תרגום מקומי",
+                text = "3. בדיקת איכות תרגום",
                 color = TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold
@@ -496,6 +505,39 @@ private fun MainScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SettingToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(
+                text = title,
+                color = TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = subtitle,
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
+        )
     }
 }
 
