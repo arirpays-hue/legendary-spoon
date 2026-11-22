@@ -49,9 +49,12 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
 
-    // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
 
-    // ML Kit Text Recognition (Latin + Hebrew/script support via ML Kit)
+    // Offline OCR (Latin)
     implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // Offline Translation (English <-> Hebrew)
+    implementation("com.google.mlkit:translate:17.0.3")
 }
