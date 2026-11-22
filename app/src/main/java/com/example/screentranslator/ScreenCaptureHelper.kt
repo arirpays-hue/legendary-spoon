@@ -57,7 +57,7 @@ class ScreenCaptureHelper(
             val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
                 val now = System.currentTimeMillis()
-                val shouldDecode = requestFreshFrame || latestBitmap == null || (now - lastFrameTimestamp > 700L)
+                val shouldDecode = requestFreshFrame || latestBitmap == null || (now - lastFrameTimestamp > 240L)
                 if (!shouldDecode) return@setOnImageAvailableListener
 
                 val plane = image.planes[0]
@@ -103,22 +103,22 @@ class ScreenCaptureHelper(
         return true
     }
 
-    suspend fun captureFrame(): Bitmap? {
+    suspend fun captureFrame(waitForFresh: Boolean = true): Bitmap? {
         val startRequestTime = System.currentTimeMillis()
         requestFreshFrame = true
 
-        // Wait briefly for a fresh frame after hiding overlay or UI update
-        repeat(8) {
-            synchronized(frameLock) {
-                val bmp = latestBitmap
-                if (bmp != null && !bmp.isRecycled && lastFrameTimestamp >= startRequestTime) {
-                    return bmp.copy(Bitmap.Config.ARGB_8888, false)
+        if (waitForFresh) {
+            repeat(7) {
+                synchronized(frameLock) {
+                    val bmp = latestBitmap
+                    if (bmp != null && !bmp.isRecycled && lastFrameTimestamp >= startRequestTime) {
+                        return bmp.copy(Bitmap.Config.ARGB_8888, false)
+                    }
                 }
+                delay(45L)
             }
-            delay(50L)
         }
 
-        // Fallback to latest available frame if the screen is completely static
         return synchronized(frameLock) {
             val bmp = latestBitmap
             if (bmp != null && !bmp.isRecycled) {
