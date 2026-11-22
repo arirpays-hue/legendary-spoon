@@ -1,7 +1,9 @@
 package com.example.screentranslator
 
 import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
@@ -13,49 +15,71 @@ class OfflineEnHeTranslator {
     private var translator: Translator? = null
     private var isModelReady = false
 
-    suspend fun prepareModel(requireWifiOnly: Boolean = false): Boolean {
+    private fun getOrCreateClient(): Translator {
+        translator?.let { return it }
         val options = TranslatorOptions.Builder()
             .setSourceLanguage(TranslateLanguage.ENGLISH)
             .setTargetLanguage(TranslateLanguage.HEBREW)
             .build()
+        return Translation.getClient(options).also { translator = it }
+    }
 
-        val client = Translation.getClient(options)
-        translator = client
-
+    suspend fun isModelDownloaded(): Boolean {
         return try {
-            val conditionsBuilder = DownloadConditions.Builder()
-            if (requireWifiOnly) {
-                conditionsBuilder.requireWifi()
+            val hebrewModel = TranslateRemoteModel.Builder(TranslateLanguage.HEBREW).build()
+            val downloaded = RemoteModelManager.getInstance()
+                .isModelDownloaded(hebrewModel)
+                .await()
+            if (downloaded) {
+                getOrCreateClient()
+                isModelReady = true
             }
-            client.downloadModelIfNeeded(conditionsBuilder.build()).await()
-            isModelReady = true
-            true
+            downloaded
         } catch (_: Exception) {
-            isModelReady = false
             false
+        }
+    }
+
+    suspend fun prepareModel(): Result<Unit> {
+        return try {
+            val client = getOrCreateClient()
+            val conditions = DownloadConditions.Builder().build()
+            client.downloadModelIfNeeded(conditions).await()
+            isModelReady = true
+            Result.success(Unit)
+        } catch (e: Exception) {
+            isModelReady = false
+            Result.failure(e)
         }
     }
 
     suspend fun translateEnglishToHebrew(text: String): String {
         val clean = text.trim()
         if (clean.isEmpty()) return ""
+        if (!containsEnglishLetters(clean)) return ""
 
         cache[clean]?.let { return it }
 
-        val client = translator ?: return clean
         if (!isModelReady) {
-            val ready = prepareModel(requireWifiOnly = false)
-            if (!ready) return clean
+            val ready = prepareModel()
+            if (ready.isFailure) return ""
         }
 
         return try {
-            val result = client.translate(clean).await().trim()
-            val finalText = if (result.isNotEmpty()) result else clean
-            cache[clean] = finalText
-            finalText
+            val result = getOrCreateClient().translate(clean).await().trim()
+            if (result.isNotEmpty()) {
+                cache[clean] = result
+                result
+            } else {
+                ""
+            }
         } catch (_: Exception) {
-            clean
+            ""
         }
+    }
+
+    fun containsEnglishLetters(text: String): Boolean {
+        return text.any { it in 'A'..'Z' || it in 'a'..'z' }
     }
 
     fun close() {
