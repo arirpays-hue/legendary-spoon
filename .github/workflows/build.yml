@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-apk:
@@ -22,15 +22,31 @@ jobs:
           java-version: "17"
           distribution: "temurin"
 
-      - name: Decode signing keystore from GitHub Secrets
+      - name: Ensure persistent signing keystore
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
           if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
             echo "$SIGNING_KEYSTORE_BASE64" | base64 --decode > app/app-signing.jks
-            echo "Persistent keystore decoded from secret."
+            echo "Using persistent keystore from GitHub Secrets."
+          elif [ -f "app/app-signing.jks" ]; then
+            echo "Using existing repository keystore."
           else
-            echo "::warning::SIGNING_KEYSTORE_BASE64 secret is not set. Building with ephemeral debug key."
+            keytool -genkeypair -v \
+              -keystore app/app-signing.jks \
+              -storetype JKS \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -alias translator_key \
+              -storepass translator123 \
+              -keypass translator123 \
+              -dname "CN=ScreenTranslator, OU=App, O=ScreenTranslator, L=Jerusalem, S=IL, C=IL"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -f app/app-signing.jks
+            git commit -m "Persist app signing keystore for in-place updates [skip ci]" || true
+            git push || echo "::warning::Enable Read and write permissions under Settings -> Actions -> General so updates never require uninstalling."
           fi
 
       - name: Setup Gradle
@@ -43,16 +59,21 @@ jobs:
           fi
           chmod +x gradlew
 
-      - name: Assemble Debug APK
+      - name: Assemble Debug APKs
         env:
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Clean temporary keystore
+      - name: Clean secret keystore if decoded from Secrets
         if: always()
-        run: rm -f app/app-signing.jks
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
+            rm -f app/app-signing.jks
+          fi
 
       - name: Upload All APKs
         uses: actions/upload-artifact@v4
