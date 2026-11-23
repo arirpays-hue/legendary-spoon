@@ -8,6 +8,7 @@ import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -16,7 +17,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -35,13 +38,16 @@ class ScreenTranslationEngine(context: Context) {
     private val cacheLock = Any()
     private val cache = LruCache<String, String>(2500)
     private val modelMutex = Mutex()
+    private val onlineSemaphore = Semaphore(4)
 
     private val translators = ConcurrentHashMap<String, Translator>()
     private val readyPairs = ConcurrentHashMap<String, Boolean>()
 
-    // Loaded 60-part fast-pack dictionaries keyed by "source_target" -> (lowercasedSource -> translation)
     private val loadedPacks = ConcurrentHashMap<String, Map<String, String>>()
     private val loadedPackTimestamps = ConcurrentHashMap<String, Long>()
+
+    @Volatile
+    private var isClosed = false
 
     private fun pairKey(source: LanguageOption, target: LanguageOption): String =
         "${source.code}->${target.code}"
@@ -57,10 +63,12 @@ class ScreenTranslationEngine(context: Context) {
         }
     }
 
-    private fun getOrCreateClient(source: LanguageOption, target: LanguageOption): Translator {
+    private fun getOrCreateClient(source: LanguageOption, target: LanguageOption): Translator? {
+        if (isClosed) return null
         val key = pairKey(source, target)
         translators[key]?.let { return it }
         synchronized(translators) {
+            if (isClosed) return null
             translators[key]?.let { return it }
             val options = TranslatorOptions.Builder()
                 .setSourceLanguage(source.code)
@@ -71,14 +79,13 @@ class ScreenTranslationEngine(context: Context) {
     }
 
     suspend fun getDownloadedLanguageCodes(): Set<String> = withContext(Dispatchers.IO) {
-        try {
+        if (isClosed) return@withContext emptySet()
+        CrashGuard.safeCall("TranslationEngine.getDownloaded", emptySet()) {
             RemoteModelManager.getInstance()
                 .getDownloadedModels(TranslateRemoteModel::class.java)
                 .await()
                 .map { it.language }
                 .toSet()
-        } catch (_: Exception) {
-            emptySet()
         }
     }
 
@@ -86,21 +93,19 @@ class ScreenTranslationEngine(context: Context) {
         source: LanguageOption,
         target: LanguageOption
     ): Boolean = withContext(Dispatchers.IO) {
-        if (source.code == target.code) return@withContext false
-        try {
+        if (isClosed || source.code == target.code) return@withContext false
+        CrashGuard.safeCall("TranslationEngine.isPairReady", false) {
             val manager = RemoteModelManager.getInstance()
             val srcModel = TranslateRemoteModel.Builder(source.code).build()
             val tgtModel = TranslateRemoteModel.Builder(target.code).build()
             val srcReady = manager.isModelDownloaded(srcModel).await()
             val tgtReady = manager.isModelDownloaded(tgtModel).await()
             val bothReady = srcReady && tgtReady
-            if (bothReady) {
+            if (bothReady && !isClosed) {
                 getOrCreateClient(source, target)
                 readyPairs[pairKey(source, target)] = true
             }
             bothReady
-        } catch (_: Exception) {
-            false
         }
     }
 
@@ -109,6 +114,8 @@ class ScreenTranslationEngine(context: Context) {
         target: LanguageOption,
         onProgress: ((progress: Float, messageHe: String) -> Unit)? = null
     ): Result<Unit> = modelMutex.withLock {
+        if (isClosed) return@withLock Result.failure(IllegalStateException("המנוע נסגר"))
+
         val validation = EdgeCasePolicy.validateLanguagePair(source, target)
         if (!validation.isValid) {
             return@withLock Result.failure(
@@ -130,6 +137,7 @@ class ScreenTranslationEngine(context: Context) {
 
         return@withLock try {
             val client = getOrCreateClient(source, target)
+                ?: return@withLock Result.failure(IllegalStateException("המנוע נסגר"))
             val conditions = DownloadConditions.Builder().build()
 
             coroutineScope {
@@ -158,9 +166,12 @@ class ScreenTranslationEngine(context: Context) {
             readyPairs[key] = true
             onProgress?.invoke(1f, "המודל הורד בהצלחה ומוכן ללא אינטרנט")
             Result.success(Unit)
-        } catch (e: Exception) {
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
             readyPairs[key] = false
-            Result.failure(e)
+            CrashGuard.recordError("TranslationEngine.prepareModel", t)
+            Result.failure(t)
         }
     }
 
@@ -175,22 +186,26 @@ class ScreenTranslationEngine(context: Context) {
                 }
                 for (k in toRemove) {
                     readyPairs.remove(k)
-                    runCatching { translators.remove(k)?.close() }
+                    CrashGuard.safeRun("TranslationEngine.closeRemoved") {
+                        translators.remove(k)?.close()
+                    }
                 }
                 Result.success(Unit)
-            } catch (e: Exception) {
-                Result.failure(e)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                CrashGuard.recordError("TranslationEngine.deleteModel", t)
+                Result.failure(t)
             }
         }
     }
 
-    /**
-     * טעינת חבילת מילון מהירה שהורדה באמצעות מנוע 60 החלקים (תומך ב-JSON וב-TSV).
-     */
     fun getOrLoadFastPack(source: LanguageOption, target: LanguageOption): Map<String, String> {
+        if (isClosed) return emptyMap()
         val modelId = "fastpack_${source.code}_${target.code}"
-        val file = SegmentedModelDownloader(appContext).getPackFile(modelId)
-        if (!file.exists() || file.length() == 0L || file.length() > 20L * 1024L * 1024L) {
+        val file = SegmentedModelDownloader.packFileFor(appContext, modelId)
+        // Strict 5MB limit to guarantee zero OutOfMemoryError when parsing into RAM
+        if (!file.exists() || file.length() == 0L || file.length() > 5L * 1024L * 1024L) {
             loadedPacks.remove(modelId)
             loadedPackTimestamps.remove(modelId)
             return emptyMap()
@@ -209,10 +224,10 @@ class ScreenTranslationEngine(context: Context) {
 
     private fun parseDictionaryPack(file: File): Map<String, String> {
         val map = HashMap<String, String>()
-        val maxEntries = 50_000
-        runCatching {
+        val maxEntries = 30_000
+        CrashGuard.safeRun("TranslationEngine.parsePack") {
             val content = file.readText(Charsets.UTF_8).trim()
-            if (content.isEmpty()) return emptyMap()
+            if (content.isEmpty()) return@safeRun
 
             when {
                 content.startsWith("{") -> {
@@ -290,7 +305,7 @@ class ScreenTranslationEngine(context: Context) {
         target: LanguageOption = LanguageCatalog.defaultTarget,
         offlineOnly: Boolean = true
     ): Map<String, String> = withContext(Dispatchers.IO) {
-        if (source.code == target.code) return@withContext emptyMap()
+        if (isClosed || source.code == target.code) return@withContext emptyMap()
 
         val uniqueInputs = texts
             .map { it.replace('\n', ' ').trim() }
@@ -338,7 +353,7 @@ class ScreenTranslationEngine(context: Context) {
             }
         }
 
-        if (uncachedOfflineOnly.isNotEmpty()) {
+        if (uncachedOfflineOnly.isNotEmpty() && !isClosed) {
             val offlineResolved = translateBatchOffline(uncachedOfflineOnly, source, target)
             for ((src, tr) in offlineResolved) {
                 if (tr.isNotBlank()) {
@@ -393,11 +408,15 @@ class ScreenTranslationEngine(context: Context) {
         chunks.map { chunk ->
             async(Dispatchers.IO) {
                 if (chunk.size == 1) {
-                    val single = fetchOnlineTranslation(chunk[0], source, target)
+                    val single = onlineSemaphore.withPermit {
+                        fetchOnlineTranslation(chunk[0], source, target)
+                    }
                     if (!single.isNullOrBlank()) out[chunk[0]] = single
                 } else {
                     val joined = chunk.joinToString("\n")
-                    val batched = fetchOnlineTranslation(joined, source, target)
+                    val batched = onlineSemaphore.withPermit {
+                        fetchOnlineTranslation(joined, source, target)
+                    }
                     val lines = batched?.split('\n')?.map { it.trim() }
 
                     if (lines != null && lines.size == chunk.size) {
@@ -408,7 +427,9 @@ class ScreenTranslationEngine(context: Context) {
                         coroutineScope {
                             chunk.map { item ->
                                 async(Dispatchers.IO) {
-                                    val single = fetchOnlineTranslation(item, source, target)
+                                    val single = onlineSemaphore.withPermit {
+                                        fetchOnlineTranslation(item, source, target)
+                                    }
                                     if (!single.isNullOrBlank()) out[item] = single
                                 }
                             }.awaitAll()
@@ -426,7 +447,7 @@ class ScreenTranslationEngine(context: Context) {
         source: LanguageOption,
         target: LanguageOption
     ): String? {
-        return try {
+        return CrashGuard.safeCall("TranslationEngine.fetchOnline", null) {
             val encoded = URLEncoder.encode(text, "UTF-8")
             val urlStr =
                 "https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source.onlineCode}&tl=${target.onlineCode}&dt=t&q=$encoded"
@@ -439,11 +460,11 @@ class ScreenTranslationEngine(context: Context) {
             }
 
             try {
-                if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
+                if (conn.responseCode != HttpURLConnection.HTTP_OK) return@safeCall null
                 val body = readLimitedResponse(conn, EdgeCasePolicy.MAX_ONLINE_RESPONSE_BYTES)
-                    ?: return null
+                    ?: return@safeCall null
                 val root = JSONArray(body)
-                val segments = root.optJSONArray(0) ?: return null
+                val segments = root.optJSONArray(0) ?: return@safeCall null
                 val sb = StringBuilder()
                 for (i in 0 until segments.length()) {
                     val part = segments.optJSONArray(i)
@@ -456,8 +477,6 @@ class ScreenTranslationEngine(context: Context) {
             } finally {
                 conn.disconnect()
             }
-        } catch (_: Exception) {
-            null
         }
     }
 
@@ -482,23 +501,27 @@ class ScreenTranslationEngine(context: Context) {
         source: LanguageOption,
         target: LanguageOption
     ): Map<String, String> = coroutineScope {
+        if (isClosed) return@coroutineScope emptyMap()
         val key = pairKey(source, target)
         if (readyPairs[key] != true) {
             val ready = prepareModel(source, target)
             if (ready.isFailure) return@coroutineScope emptyMap()
         }
 
-        val client = getOrCreateClient(source, target)
+        val client = getOrCreateClient(source, target) ?: return@coroutineScope emptyMap()
         val out = ConcurrentHashMap<String, String>()
         items.map { item ->
             async(Dispatchers.Default) {
+                if (isClosed) return@async
                 try {
                     val translated = client.translate(item).await().trim()
                     if (translated.isNotEmpty()) {
                         out[item] = translated
                     }
-                } catch (_: Exception) {
-                    // Ignore single-item failure
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    CrashGuard.recordError("TranslationEngine.offlineItem", t)
                 }
             }
         }.awaitAll()
@@ -512,13 +535,18 @@ class ScreenTranslationEngine(context: Context) {
     }
 
     fun close() {
+        isClosed = true
         clearCache()
         loadedPacks.clear()
         loadedPackTimestamps.clear()
         readyPairs.clear()
-        for (client in translators.values) {
-            runCatching { client.close() }
+        synchronized(translators) {
+            for (client in translators.values) {
+                CrashGuard.safeRun("TranslationEngine.closeClient") {
+                    client.close()
+                }
+            }
+            translators.clear()
         }
-        translators.clear()
     }
 }
