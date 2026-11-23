@@ -21,6 +21,7 @@ import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextDirectionHeuristics
@@ -37,6 +38,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,6 +51,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -73,9 +76,17 @@ class OverlayService : Service() {
     private lateinit var translationEngine: ScreenTranslationEngine
     private val diffTracker = ScreenDiffTracker()
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Main +
+            CrashGuard.coroutineHandler("OverlayService.scope")
+    )
     private var watcherJob: Job? = null
     private val overlayGeneration = AtomicLong(0L)
+    private val isBusy = AtomicBoolean(false)
+
+    @Volatile
+    private var isServiceDestroyed = false
 
     private var sourceLang: LanguageOption = LanguageCatalog.defaultSource
     private var targetLang: LanguageOption = LanguageCatalog.defaultTarget
@@ -83,7 +94,6 @@ class OverlayService : Service() {
     private var offlineOnlyMode = true
     private var skipBrandNames = true
     private var enableScanWave = true
-    private var isBusy = false
     private var isDockedRight = true
     private var isMenuExpanded = false
     private var screenWidth = 1080
@@ -96,6 +106,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isServiceDestroyed = false
         _serviceRunningState.value = true
         translationEngine = ScreenTranslationEngine(applicationContext)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -105,33 +116,33 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent == null || intent.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
         }
 
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         val dataIntent: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent?.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
+            intent.getParcelableExtra(EXTRA_DATA_INTENT, Intent::class.java)
         } else {
             @Suppress("DEPRECATION")
-            intent?.getParcelableExtra(EXTRA_DATA_INTENT)
+            intent.getParcelableExtra(EXTRA_DATA_INTENT)
         }
-        val startInAuto = intent?.getBooleanExtra(EXTRA_AUTO_MODE, false) ?: false
-        offlineOnlyMode = intent?.getBooleanExtra(EXTRA_OFFLINE_ONLY, true) ?: true
-        skipBrandNames = intent?.getBooleanExtra(EXTRA_SKIP_BRANDS, true) ?: true
-        enableScanWave = intent?.getBooleanExtra(EXTRA_SCAN_WAVE, true) ?: true
+        val startInAuto = intent.getBooleanExtra(EXTRA_AUTO_MODE, false)
+        offlineOnlyMode = intent.getBooleanExtra(EXTRA_OFFLINE_ONLY, true)
+        skipBrandNames = intent.getBooleanExtra(EXTRA_SKIP_BRANDS, true)
+        enableScanWave = intent.getBooleanExtra(EXTRA_SCAN_WAVE, true)
 
         sourceLang = LanguageCatalog.findByCode(
-            intent?.getStringExtra(EXTRA_SOURCE_LANG) ?: LanguageCatalog.defaultSource.code
+            intent.getStringExtra(EXTRA_SOURCE_LANG) ?: LanguageCatalog.defaultSource.code
         )
         targetLang = LanguageCatalog.findByCode(
-            intent?.getStringExtra(EXTRA_TARGET_LANG) ?: LanguageCatalog.defaultTarget.code
+            intent.getStringExtra(EXTRA_TARGET_LANG) ?: LanguageCatalog.defaultTarget.code
         )
 
         val validation = EdgeCasePolicy.validateLanguagePair(sourceLang, targetLang)
         if (!validation.isValid) {
-            Toast.makeText(this, validation.errorHe ?: "זוג שפות לא תקין", Toast.LENGTH_LONG).show()
+            safeToast(validation.errorHe ?: "זוג שפות לא תקין", Toast.LENGTH_LONG)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -141,19 +152,37 @@ class OverlayService : Service() {
             return START_NOT_STICKY
         }
 
+        if (!Settings.canDrawOverlays(this)) {
+            safeToast("נדרשת הרשאת תצוגה מעל אפליקציות", Toast.LENGTH_LONG)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         } else {
             0
         }
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), fgsType)
+        val foregroundStarted = CrashGuard.safeCall("OverlayService.startForeground", false) {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), fgsType)
+            true
+        }
+        if (!foregroundStarted) {
+            safeToast("המערכת חסמה את הפעלת שירות לכידת המסך — נסה להפעיל שוב", Toast.LENGTH_LONG)
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         val (width, height, densityDpi) = getScreenMetrics()
-        screenWidth = width
-        screenHeight = height
+        screenWidth = width.coerceAtLeast(320)
+        screenHeight = height.coerceAtLeast(320)
 
         if (!::overlayCanvasView.isInitialized) {
-            setupOverlayViews()
+            if (!setupOverlayViews()) {
+                safeToast("לא ניתן לפתוח את שכבת התרגום", Toast.LENGTH_LONG)
+                stopSelf()
+                return START_NOT_STICKY
+            }
         } else {
             clearOverlayBlocks()
             diffTracker.reset()
@@ -164,17 +193,19 @@ class OverlayService : Service() {
             context = this,
             resultCode = resultCode,
             dataIntent = dataIntent,
-            initialFullWidth = width,
-            initialFullHeight = height,
+            initialFullWidth = screenWidth,
+            initialFullHeight = screenHeight,
             initialDensityDpi = densityDpi,
             onProjectionStopped = {
                 serviceScope.launch {
-                    stopSelf()
+                    if (!isServiceDestroyed) {
+                        stopSelf()
+                    }
                 }
             }
         )
         if (!helper.start()) {
-            Toast.makeText(this, "שגיאה בהפעלת לכידת מסך", Toast.LENGTH_SHORT).show()
+            safeToast("שגיאה בהפעלת לכידת מסך", Toast.LENGTH_SHORT)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -185,17 +216,16 @@ class OverlayService : Service() {
 
         serviceScope.launch {
             if (validation.warningHe != null) {
-                Toast.makeText(this@OverlayService, validation.warningHe, Toast.LENGTH_LONG).show()
+                safeToast(validation.warningHe, Toast.LENGTH_LONG)
             }
 
             if (offlineOnlyMode) {
                 val ready = translationEngine.prepareModel(sourceLang, targetLang)
                 if (ready.isFailure) {
-                    Toast.makeText(
-                        this@OverlayService,
+                    safeToast(
                         "המודל ${sourceLang.nameHe} ← ${targetLang.nameHe} לא מותקן — הורד אותו בלשונית מודלים",
                         Toast.LENGTH_LONG
-                    ).show()
+                    )
                 }
             } else {
                 launch(Dispatchers.IO) {
@@ -203,14 +233,11 @@ class OverlayService : Service() {
                 }
             }
 
+            if (isServiceDestroyed) return@launch
             if (startInAuto) {
                 toggleAutoMode(true)
             } else {
-                Toast.makeText(
-                    this@OverlayService,
-                    "לשונית התרגום פעילה (${sourceLang.nameHe} ← ${targetLang.nameHe})",
-                    Toast.LENGTH_SHORT
-                ).show()
+                safeToast("לשונית התרגום פעילה (${sourceLang.nameHe} ← ${targetLang.nameHe})", Toast.LENGTH_SHORT)
             }
         }
 
@@ -219,44 +246,61 @@ class OverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        val (newW, newH, newDpi) = getScreenMetrics()
-        if (newW == screenWidth && newH == screenHeight) return
+        CrashGuard.safeRun("OverlayService.onConfigChanged") {
+            val (newW, newH, newDpi) = getScreenMetrics()
+            if (newW <= 0 || newH <= 0 || (newW == screenWidth && newH == screenHeight)) return@safeRun
 
-        screenWidth = newW
-        screenHeight = newH
-        statusBarHeight = loadSystemBarHeight("status_bar_height", dp(30))
-        navBarHeight = loadSystemBarHeight("navigation_bar_height", dp(36))
+            screenWidth = newW
+            screenHeight = newH
+            statusBarHeight = loadSystemBarHeight("status_bar_height", dp(30))
+            navBarHeight = loadSystemBarHeight("navigation_bar_height", dp(36))
 
-        clearOverlayBlocks()
-        diffTracker.reset()
-        captureHelper?.resize(newW, newH, newDpi)
-        lastCheckedFrameVersion = -1L
+            clearOverlayBlocks()
+            diffTracker.reset()
+            captureHelper?.resize(newW, newH, newDpi)
+            lastCheckedFrameVersion = -1L
 
-        if (::rootControlContainer.isInitialized) {
-            dockToCurrentEdge()
+            if (::rootControlContainer.isInitialized) {
+                dockToCurrentEdge()
+            }
+        }
+    }
+
+    private fun safeToast(message: String, duration: Int) {
+        if (isServiceDestroyed) return
+        CrashGuard.safeRun("OverlayService.toast") {
+            Toast.makeText(applicationContext, message, duration).show()
         }
     }
 
     private fun getScreenMetrics(): Triple<Int, Int, Int> {
-        val densityDpi = resources.displayMetrics.densityDpi
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.maximumWindowMetrics.bounds
-            Triple(bounds.width(), bounds.height(), densityDpi)
-        } else {
-            val metrics = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.getRealMetrics(metrics)
-            Triple(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+        val densityDpi = resources.displayMetrics.densityDpi.coerceAtLeast(160)
+        return CrashGuard.safeCall("OverlayService.metrics", Triple(1080, 2400, densityDpi)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bounds = windowManager.maximumWindowMetrics.bounds
+                Triple(bounds.width().coerceAtLeast(320), bounds.height().coerceAtLeast(320), densityDpi)
+            } else {
+                val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getRealMetrics(metrics)
+                Triple(
+                    metrics.widthPixels.coerceAtLeast(320),
+                    metrics.heightPixels.coerceAtLeast(320),
+                    metrics.densityDpi.coerceAtLeast(160)
+                )
+            }
         }
     }
 
     private fun loadSystemBarHeight(resourceName: String, fallbackPx: Int): Int {
-        val id = resources.getIdentifier(resourceName, "dimen", "android")
-        return if (id > 0) resources.getDimensionPixelSize(id) else fallbackPx
+        return CrashGuard.safeCall("OverlayService.barHeight", fallbackPx) {
+            val id = resources.getIdentifier(resourceName, "dimen", "android")
+            if (id > 0) resources.getDimensionPixelSize(id) else fallbackPx
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility", "RtlHardcoded")
-    private fun setupOverlayViews() {
+    private fun setupOverlayViews(): Boolean {
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
@@ -283,7 +327,12 @@ class OverlayService : Service() {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
-        windowManager.addView(overlayCanvasView, canvasParams)
+
+        val addedCanvas = CrashGuard.safeCall("OverlayService.addCanvas", false) {
+            windowManager.addView(overlayCanvasView, canvasParams)
+            true
+        }
+        if (!addedCanvas) return false
 
         rootControlContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -382,6 +431,7 @@ class OverlayService : Service() {
         val touchSlop = dp(10)
 
         edgeHandle.setOnTouchListener { _, event ->
+            if (isServiceDestroyed) return@setOnTouchListener false
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     val currentWidth = rootControlContainer.width.coerceAtLeast(dp(22))
@@ -421,6 +471,7 @@ class OverlayService : Service() {
                         val sideChanged = newDockedRight != isDockedRight
                         isDockedRight = newDockedRight
                         rootControlContainer.post {
+                            if (isServiceDestroyed) return@post
                             if (sideChanged) {
                                 applyEdgeStyleAndOrder()
                             }
@@ -431,7 +482,9 @@ class OverlayService : Service() {
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     if (isDragging) {
-                        rootControlContainer.post { dockToCurrentEdge() }
+                        rootControlContainer.post {
+                            if (!isServiceDestroyed) dockToCurrentEdge()
+                        }
                     }
                     true
                 }
@@ -439,17 +492,35 @@ class OverlayService : Service() {
             }
         }
 
-        windowManager.addView(rootControlContainer, controlParams)
+        val addedControls = CrashGuard.safeCall("OverlayService.addControls", false) {
+            windowManager.addView(rootControlContainer, controlParams)
+            true
+        }
+        if (!addedControls) {
+            CrashGuard.safeRun("OverlayService.rollbackCanvas") {
+                if (overlayCanvasView.isAttachedToWindow) {
+                    windowManager.removeView(overlayCanvasView)
+                }
+            }
+            return false
+        }
+        return true
     }
 
     private fun safeUpdateControlLayout() {
-        if (::rootControlContainer.isInitialized && rootControlContainer.isAttachedToWindow) {
-            runCatching { windowManager.updateViewLayout(rootControlContainer, controlParams) }
+        if (!isServiceDestroyed &&
+            ::rootControlContainer.isInitialized &&
+            rootControlContainer.isAttachedToWindow
+        ) {
+            CrashGuard.safeRun("OverlayService.updateControlLayout") {
+                windowManager.updateViewLayout(rootControlContainer, controlParams)
+            }
         }
     }
 
     @SuppressLint("RtlHardcoded")
     private fun dockToCurrentEdge() {
+        if (isServiceDestroyed || !::controlParams.isInitialized) return
         controlParams.gravity = Gravity.TOP or if (isDockedRight) Gravity.RIGHT else Gravity.LEFT
         controlParams.x = 0
         val minY = statusBarHeight + dp(12)
@@ -459,6 +530,7 @@ class OverlayService : Service() {
     }
 
     private fun applyEdgeStyleAndOrder() {
+        if (isServiceDestroyed || !::rootControlContainer.isInitialized) return
         val radius = dp(14).toFloat()
         val radii = if (isDockedRight) {
             floatArrayOf(radius, radius, 0f, 0f, 0f, 0f, radius, radius)
@@ -488,12 +560,14 @@ class OverlayService : Service() {
     }
 
     private fun setMenuExpanded(expanded: Boolean) {
+        if (isServiceDestroyed || !::menuContainer.isInitialized) return
         isMenuExpanded = expanded
         menuContainer.visibility = if (expanded) View.VISIBLE else View.GONE
         dockToCurrentEdge()
     }
 
     private fun updateIndicatorColor(hex: String) {
+        if (isServiceDestroyed || !::edgeIndicator.isInitialized) return
         val bg = edgeIndicator.background as? GradientDrawable
         bg?.setColor(Color.parseColor(hex))
     }
@@ -520,15 +594,23 @@ class OverlayService : Service() {
     }
 
     private fun getControlScreenRect(): Rect {
-        val loc = IntArray(2)
-        rootControlContainer.getLocationOnScreen(loc)
-        val pad = dp(6)
-        return Rect(
-            (loc[0] - pad).coerceAtLeast(0),
-            (loc[1] - pad).coerceAtLeast(0),
-            (loc[0] + rootControlContainer.width + pad).coerceAtMost(screenWidth),
-            (loc[1] + rootControlContainer.height + pad).coerceAtMost(screenHeight)
-        )
+        if (isServiceDestroyed ||
+            !::rootControlContainer.isInitialized ||
+            !rootControlContainer.isAttachedToWindow
+        ) {
+            return Rect(0, 0, 0, 0)
+        }
+        return CrashGuard.safeCall("OverlayService.controlRect", Rect(0, 0, 0, 0)) {
+            val loc = IntArray(2)
+            rootControlContainer.getLocationOnScreen(loc)
+            val pad = dp(6)
+            Rect(
+                (loc[0] - pad).coerceAtLeast(0),
+                (loc[1] - pad).coerceAtLeast(0),
+                (loc[0] + rootControlContainer.width + pad).coerceAtMost(screenWidth),
+                (loc[1] + rootControlContainer.height + pad).coerceAtMost(screenHeight)
+            )
+        }
     }
 
     private enum class OverlayAnimType { NONE, BLOCK_FADE, FULL_WAVE }
@@ -538,6 +620,7 @@ class OverlayService : Service() {
         expectedGeneration: Long,
         animType: OverlayAnimType = OverlayAnimType.NONE
     ) {
+        if (isServiceDestroyed || !::overlayCanvasView.isInitialized) return
         if (overlayGeneration.get() != expectedGeneration) return
         if (blocks.isEmpty()) {
             clearOverlayBlocks()
@@ -547,14 +630,16 @@ class OverlayService : Service() {
         val targetH = overlayCanvasView.height.takeIf { it > 0 } ?: screenHeight
         val isTargetRtl = targetLang.isRtl
         val layouts = withContext(Dispatchers.Default) {
-            OverlayLayoutEngine.compute(
-                blocks = blocks,
-                canvasWidth = targetW,
-                canvasHeight = targetH,
-                isTargetRtl = isTargetRtl
-            )
+            CrashGuard.safeCall("OverlayService.computeLayout", emptyList()) {
+                OverlayLayoutEngine.compute(
+                    blocks = blocks,
+                    canvasWidth = targetW,
+                    canvasHeight = targetH,
+                    isTargetRtl = isTargetRtl
+                )
+            }
         }
-        if (overlayGeneration.get() != expectedGeneration) return
+        if (isServiceDestroyed || overlayGeneration.get() != expectedGeneration) return
         overlayCanvasView.visibility = View.VISIBLE
         val effectiveAnim = if (enableScanWave) animType else OverlayAnimType.NONE
         overlayCanvasView.updateLayouts(
@@ -575,6 +660,7 @@ class OverlayService : Service() {
 
     private suspend fun refreshBaselineAfterOverlay(extraDelayMs: Long = 120L) {
         delay(extraDelayMs)
+        if (isServiceDestroyed) return
         val helper = captureHelper ?: return
         val captured = helper.captureFrame(waitForFresh = false) ?: return
         try {
@@ -582,20 +668,26 @@ class OverlayService : Service() {
                 diffTracker.updateBaseline(captured.bitmap)
             }
             lastCheckedFrameVersion = helper.getFrameVersion()
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            CrashGuard.recordError("OverlayService.refreshBaseline", t)
         } finally {
-            captured.bitmap.recycle()
+            if (!captured.bitmap.isRecycled) captured.bitmap.recycle()
         }
     }
 
     private fun startScreenWatcher() {
         watcherJob?.cancel()
         watcherJob = serviceScope.launch {
-            while (isActive) {
+            while (isActive && !isServiceDestroyed) {
                 delay(if (isAutoMode) 300L else 420L)
-                if (isBusy) continue
+                if (isBusy.get()) continue
+                if (!::overlayCanvasView.isInitialized) continue
                 if (!isAutoMode && !overlayCanvasView.hasBlocks()) continue
 
                 val helper = captureHelper ?: continue
+                if (!helper.isActive()) continue
                 val version = helper.getFrameVersion()
                 if (version == lastCheckedFrameVersion) continue
                 lastCheckedFrameVersion = version
@@ -606,6 +698,7 @@ class OverlayService : Service() {
     }
 
     private fun toggleAutoMode(enable: Boolean) {
+        if (isServiceDestroyed || !::autoMenuButton.isInitialized) return
         isAutoMode = enable
         val bg = autoMenuButton.background as? GradientDrawable
 
@@ -657,14 +750,18 @@ class OverlayService : Service() {
                     clearOverlayBlocks()
                     if (isAutoMode) {
                         waitForScreenToSettle()
-                        if (isAutoMode) {
+                        if (isAutoMode && !isServiceDestroyed) {
                             runFullTranslation(showFeedback = false, hideOverlayFirst = false)
                         }
                     }
                 }
             }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            CrashGuard.recordError("OverlayService.checkChanges", t)
         } finally {
-            captured.bitmap.recycle()
+            if (!captured.bitmap.isRecycled) captured.bitmap.recycle()
         }
     }
 
@@ -672,6 +769,7 @@ class OverlayService : Service() {
         val helper = captureHelper ?: return
         repeat(3) {
             delay(180L)
+            if (isServiceDestroyed) return
             val probe = helper.captureFrame(waitForFresh = true) ?: return
             try {
                 val controlRect = getControlScreenRect()
@@ -688,8 +786,13 @@ class OverlayService : Service() {
                 if (res is DiffResult.Unchanged) {
                     return
                 }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                CrashGuard.recordError("OverlayService.waitSettle", t)
+                return
             } finally {
-                probe.bitmap.recycle()
+                if (!probe.bitmap.isRecycled) probe.bitmap.recycle()
             }
         }
     }
@@ -723,9 +826,10 @@ class OverlayService : Service() {
     }
 
     private suspend fun translateChangedRegion(currentCapture: CapturedFrame, rawDirtyRect: Rect) {
-        if (isBusy) return
+        if (isServiceDestroyed) return
         val helper = captureHelper ?: return
-        isBusy = true
+        if (!isBusy.compareAndSet(false, true)) return
+
         val gen = overlayGeneration.get()
         updateIndicatorColor("#F59E0B")
 
@@ -756,6 +860,8 @@ class OverlayService : Service() {
 
             try {
                 val srcBitmap = activeCapture.bitmap
+                if (srcBitmap.isRecycled || srcBitmap.width <= 16 || srcBitmap.height <= 12) return
+
                 val bmpLeft = (expandedScreenRect.left / activeCapture.scaleX).toInt()
                     .coerceIn(0, srcBitmap.width - 1)
                 val bmpTop = (expandedScreenRect.top / activeCapture.scaleY).toInt()
@@ -783,35 +889,38 @@ class OverlayService : Service() {
                         excludeRect = getControlScreenRect()
                     )
                     val translatedNew = translateBlocksFiltered(detected)
-                    if (overlayGeneration.get() == gen) {
+                    if (!isServiceDestroyed && overlayGeneration.get() == gen) {
                         val anim = if (translatedNew.isNotEmpty()) OverlayAnimType.BLOCK_FADE else OverlayAnimType.NONE
                         updateOverlayBlocksIfCurrent(preserved + translatedNew, gen, animType = anim)
                         refreshBaselineAfterOverlay(if (anim == OverlayAnimType.BLOCK_FADE && enableScanWave) 300L else 120L)
                     }
                 } finally {
-                    cropped.recycle()
+                    if (!cropped.isRecycled) cropped.recycle()
                 }
             } finally {
-                freshCapture?.bitmap?.recycle()
+                freshCapture?.bitmap?.let { if (!it.isRecycled) it.recycle() }
             }
-        } catch (_: Exception) {
-            // Keep existing blocks intact on transient error
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            CrashGuard.recordError("OverlayService.translateChangedRegion", t)
         } finally {
             updateIndicatorColor(if (isAutoMode) "#22C55E" else "#3B82F6")
-            isBusy = false
+            isBusy.set(false)
         }
     }
 
     private suspend fun runFullTranslation(showFeedback: Boolean, hideOverlayFirst: Boolean) {
-        if (isBusy) return
+        if (isServiceDestroyed) return
         val helper = captureHelper ?: return
-        isBusy = true
+        if (!isBusy.compareAndSet(false, true)) return
+
         val gen = overlayGeneration.incrementAndGet()
-        translateMenuButton.text = "סורק..."
+        if (::translateMenuButton.isInitialized) translateMenuButton.text = "סורק..."
         updateIndicatorColor("#F59E0B")
 
         try {
-            val hadBlocks = overlayCanvasView.hasBlocks()
+            val hadBlocks = ::overlayCanvasView.isInitialized && overlayCanvasView.hasBlocks()
             if (hideOverlayFirst && hadBlocks) {
                 overlayCanvasView.stopAnimations()
                 overlayCanvasView.visibility = View.GONE
@@ -820,11 +929,11 @@ class OverlayService : Service() {
 
             val captured = helper.captureFrame(waitForFresh = true)
             if (captured == null) {
-                if (hadBlocks && overlayGeneration.get() == gen) {
+                if (hadBlocks && !isServiceDestroyed && overlayGeneration.get() == gen) {
                     overlayCanvasView.visibility = View.VISIBLE
                 }
                 if (showFeedback) {
-                    Toast.makeText(this, "לא הצלחתי ללכוד את המסך, נסה שוב", Toast.LENGTH_SHORT).show()
+                    safeToast("לא הצלחתי ללכוד את המסך, נסה שוב", Toast.LENGTH_SHORT)
                 }
                 return
             }
@@ -841,7 +950,7 @@ class OverlayService : Service() {
                 )
 
                 val translatedBlocks = translateBlocksFiltered(blocks)
-                if (overlayGeneration.get() != gen) return
+                if (isServiceDestroyed || overlayGeneration.get() != gen) return
 
                 updateOverlayBlocksIfCurrent(
                     blocks = translatedBlocks,
@@ -855,26 +964,27 @@ class OverlayService : Service() {
                     }
                     lastCheckedFrameVersion = helper.getFrameVersion()
                     if (showFeedback) {
-                        Toast.makeText(
-                            this,
-                            "לא נמצא טקסט מתאים ב${sourceLang.nameHe} לתרגום",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        safeToast("לא נמצא טקסט מתאים ב${sourceLang.nameHe} לתרגום", Toast.LENGTH_SHORT)
                     }
                 } else {
                     refreshBaselineAfterOverlay(if (enableScanWave) 640L else 120L)
                 }
             } finally {
-                captured.bitmap.recycle()
+                if (!captured.bitmap.isRecycled) captured.bitmap.recycle()
             }
-        } catch (_: Exception) {
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            CrashGuard.recordError("OverlayService.runFullTranslation", t)
             if (showFeedback) {
-                Toast.makeText(this, "אירעה שגיאה בתרגום המסך", Toast.LENGTH_SHORT).show()
+                safeToast("אירעה שגיאה בתרגום המסך", Toast.LENGTH_SHORT)
             }
         } finally {
-            translateMenuButton.text = "תרגם מסך"
+            if (!isServiceDestroyed && ::translateMenuButton.isInitialized) {
+                translateMenuButton.text = "תרגם מסך"
+            }
             updateIndicatorColor(if (isAutoMode) "#22C55E" else "#3B82F6")
-            isBusy = false
+            isBusy.set(false)
         }
     }
 
@@ -888,13 +998,15 @@ class OverlayService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.overlay_channel_name),
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            CrashGuard.safeRun("OverlayService.createChannel") {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    getString(R.string.overlay_channel_name),
+                    NotificationManager.IMPORTANCE_LOW
+                )
+                val manager = getSystemService(NotificationManager::class.java)
+                manager?.createNotificationChannel(channel)
+            }
         }
     }
 
@@ -909,9 +1021,11 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        isServiceDestroyed = true
         _serviceRunningState.value = false
         watcherJob?.cancel()
-        captureHelper?.stop()
+        CrashGuard.safeRun("OverlayService.stopCapture") { captureHelper?.stop() }
+        captureHelper = null
         recognizerHelper.close()
         if (::translationEngine.isInitialized) {
             translationEngine.close()
@@ -919,10 +1033,18 @@ class OverlayService : Service() {
         serviceScope.cancel()
         if (::overlayCanvasView.isInitialized) {
             overlayCanvasView.stopAnimations()
-            runCatching { windowManager.removeView(overlayCanvasView) }
+            CrashGuard.safeRun("OverlayService.removeCanvas") {
+                if (overlayCanvasView.isAttachedToWindow) {
+                    windowManager.removeView(overlayCanvasView)
+                }
+            }
         }
         if (::rootControlContainer.isInitialized) {
-            runCatching { windowManager.removeView(rootControlContainer) }
+            CrashGuard.safeRun("OverlayService.removeControls") {
+                if (rootControlContainer.isAttachedToWindow) {
+                    windowManager.removeView(rootControlContainer)
+                }
+            }
         }
         super.onDestroy()
     }
@@ -947,8 +1069,10 @@ class OverlayService : Service() {
 
         @Synchronized
         fun updateBaseline(frame: Bitmap) {
-            extractInto(frame, scratchPixels)
-            baselinePixels = scratchPixels.copyOf()
+            if (frame.isRecycled || frame.width <= 0 || frame.height <= 0) return
+            if (extractInto(frame, scratchPixels)) {
+                baselinePixels = scratchPixels.copyOf()
+            }
         }
 
         @Synchronized
@@ -960,15 +1084,17 @@ class OverlayService : Service() {
             topInset: Int,
             bottomInset: Int
         ): DiffResult {
-            extractInto(frame, scratchPixels)
+            if (frame.isRecycled || frame.width <= 0 || frame.height <= 0) return DiffResult.Unchanged
+            if (!extractInto(frame, scratchPixels)) return DiffResult.Unchanged
+
             val prev = baselinePixels
             if (prev == null || prev.size != scratchPixels.size) {
                 baselinePixels = scratchPixels.copyOf()
                 return DiffResult.FullChange
             }
 
-            val scaleX = screenWidth.toFloat() / thumbW
-            val scaleY = screenHeight.toFloat() / thumbH
+            val scaleX = screenWidth.coerceAtLeast(1).toFloat() / thumbW
+            val scaleY = screenHeight.coerceAtLeast(1).toFloat() / thumbH
             val minTy = (topInset / scaleY).toInt().coerceIn(0, thumbH - 1)
             val maxTy = ((screenHeight - bottomInset) / scaleY).toInt().coerceIn(minTy + 1, thumbH)
 
@@ -1061,11 +1187,17 @@ class OverlayService : Service() {
             return false
         }
 
-        private fun extractInto(frame: Bitmap, target: IntArray) {
-            val scaled = Bitmap.createScaledBitmap(frame, thumbW, thumbH, false)
-            scaled.getPixels(target, 0, thumbW, 0, 0, thumbW, thumbH)
-            if (scaled != frame) {
-                scaled.recycle()
+        private fun extractInto(frame: Bitmap, target: IntArray): Boolean {
+            return CrashGuard.safeCall("DiffTracker.extract", false) {
+                val scaled = Bitmap.createScaledBitmap(frame, thumbW, thumbH, false)
+                try {
+                    scaled.getPixels(target, 0, thumbW, 0, 0, thumbW, thumbH)
+                    true
+                } finally {
+                    if (scaled !== frame && !scaled.isRecycled) {
+                        scaled.recycle()
+                    }
+                }
             }
         }
     }
@@ -1086,7 +1218,7 @@ class OverlayService : Service() {
             canvasHeight: Int,
             isTargetRtl: Boolean
         ): List<RenderedBlockLayout> {
-            if (blocks.isEmpty() || canvasWidth <= 0 || canvasHeight <= 0) return emptyList()
+            if (blocks.isEmpty() || canvasWidth <= 20 || canvasHeight <= 20) return emptyList()
 
             val sorted = blocks.filter { it.translatedText.isNotEmpty() }
                 .sortedWith(compareBy<RecognizedBlock> { it.bounds.top }.thenBy { it.bounds.left })
@@ -1137,6 +1269,11 @@ class OverlayService : Service() {
                     }
                 }
 
+                if (maxAllowedRight - minAllowedLeft < 40f) {
+                    minAllowedLeft = 6f
+                    maxAllowedRight = canvasWidth - 6f
+                }
+
                 val targetRect: RectF
                 val layout: StaticLayout
 
@@ -1181,8 +1318,8 @@ class OverlayService : Service() {
                         }
                         left = left.coerceAtLeast(minAllowedLeft)
                         right = right.coerceAtMost(maxAllowedRight).coerceAtLeast(left + 28f)
-                        val top = (centerY - boxH / 2f).coerceAtLeast(4f)
-                        val bottom = (top + boxH).coerceAtMost(canvasHeight - 4f)
+                        val top = (centerY - boxH / 2f).coerceIn(4f, (canvasHeight - 24f).coerceAtLeast(4f))
+                        val bottom = (top + boxH).coerceIn(top + 12f, canvasHeight - 4f)
                         targetRect = RectF(left, top, right, bottom)
                     }
                 } else {
@@ -1210,14 +1347,14 @@ class OverlayService : Service() {
                     val top = if (isRotated) {
                         block.bounds.exactCenterY() - boxH / 2f
                     } else {
-                        (block.bounds.top - padY).coerceAtLeast(4f)
+                        (block.bounds.top - padY).coerceIn(4f, (canvasHeight - 24f).coerceAtLeast(4f))
                     }
                     val bottom = if (isRotated) {
                         top + boxH
                     } else {
-                        (top + boxH).coerceAtMost(canvasHeight - 4f)
+                        (top + boxH).coerceIn(top + 12f, canvasHeight - 4f)
                     }
-                    targetRect = RectF(left, top, right, bottom)
+                    targetRect = RectF(left, top, right.coerceAtLeast(left + 28f), bottom)
                 }
 
                 results.add(
@@ -1299,53 +1436,58 @@ class OverlayService : Service() {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val totalHeight = height.toFloat().coerceAtLeast(1f)
+            if (width <= 2 || height <= 2) return
+            CrashGuard.safeRun("OverlayCanvas.onDraw") {
+                val totalHeight = height.toFloat()
 
-            for (item in layouts) {
-                val rect = item.rect
-                val reveal = effectController.blockRevealProgress(rect.top, totalHeight)
-                if (reveal <= 0.01f) continue
+                for (item in layouts) {
+                    val rect = item.rect
+                    if (rect.width() <= 1f || rect.height() <= 1f) continue
 
-                val alphaInt = (255 * reveal).toInt().coerceIn(0, 255)
-                val popScale = effectController.blockScale(reveal)
-                val isRotated = abs(item.angleDegrees) >= 2.5f
+                    val reveal = effectController.blockRevealProgress(rect.top, totalHeight)
+                    if (reveal <= 0.01f) continue
 
-                if (item.bgTopColor != item.bgBottomColor) {
-                    boxPaint.shader = LinearGradient(
-                        rect.left,
-                        rect.top,
-                        rect.left,
-                        rect.bottom,
-                        item.bgTopColor,
-                        item.bgBottomColor,
-                        Shader.TileMode.CLAMP
-                    )
-                } else {
-                    boxPaint.shader = null
-                    boxPaint.color = item.bgTopColor
+                    val alphaInt = (255 * reveal).toInt().coerceIn(0, 255)
+                    val popScale = effectController.blockScale(reveal)
+                    val isRotated = abs(item.angleDegrees) >= 2.5f
+
+                    if (item.bgTopColor != item.bgBottomColor && rect.bottom > rect.top + 1f) {
+                        boxPaint.shader = LinearGradient(
+                            rect.left,
+                            rect.top,
+                            rect.left,
+                            rect.bottom,
+                            item.bgTopColor,
+                            item.bgBottomColor,
+                            Shader.TileMode.CLAMP
+                        )
+                    } else {
+                        boxPaint.shader = null
+                        boxPaint.color = item.bgTopColor
+                    }
+                    boxPaint.alpha = alphaInt
+                    item.layout.paint.alpha = alphaInt
+
+                    canvas.save()
+                    if (isRotated) {
+                        canvas.rotate(item.angleDegrees, rect.centerX(), rect.centerY())
+                    }
+                    if (popScale < 0.999f) {
+                        canvas.scale(popScale, popScale, rect.centerX(), rect.centerY())
+                    }
+
+                    canvas.drawRoundRect(rect, 10f, 10f, boxPaint)
+                    effectController.drawBlockHighlightIfAnimating(canvas, rect, reveal)
+
+                    val textLeft = rect.left + (rect.width() - item.layout.width) / 2f
+                    val textTop = rect.top + (rect.height() - item.layout.height) / 2f
+                    canvas.translate(textLeft, textTop)
+                    item.layout.draw(canvas)
+                    canvas.restore()
                 }
-                boxPaint.alpha = alphaInt
-                item.layout.paint.alpha = alphaInt
 
-                canvas.save()
-                if (isRotated) {
-                    canvas.rotate(item.angleDegrees, rect.centerX(), rect.centerY())
-                }
-                if (popScale < 0.999f) {
-                    canvas.scale(popScale, popScale, rect.centerX(), rect.centerY())
-                }
-
-                canvas.drawRoundRect(rect, 10f, 10f, boxPaint)
-                effectController.drawBlockHighlightIfAnimating(canvas, rect, reveal)
-
-                val textLeft = rect.left + (rect.width() - item.layout.width) / 2f
-                val textTop = rect.top + (rect.height() - item.layout.height) / 2f
-                canvas.translate(textLeft, textTop)
-                item.layout.draw(canvas)
-                canvas.restore()
+                effectController.drawScanWave(canvas, width.toFloat(), totalHeight)
             }
-
-            effectController.drawScanWave(canvas, width.toFloat(), totalHeight)
         }
     }
 
