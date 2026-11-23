@@ -28,45 +28,26 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -74,7 +55,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -89,7 +69,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -99,25 +78,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -131,33 +100,9 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ceil
-import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlin.math.sin
-
-private val BgObsidian = Color(0xFF0B0E17)
-private val BgObsidianTop = Color(0xFF101526)
-private val GlassCardBg = Color(0xD9151A28)
-private val GlassCardInner = Color(0xFF0F1320)
-private val GlassBorder = Color(0x14FFFFFF) // 8% white
-private val ElectricBlue = Color(0xFF3B82F6)
-private val ElectricBlueLight = Color(0xFF60A5FA)
-private val ElectricCyan = Color(0xFF38BDF8)
-private val GlowPurple = Color(0xFF7C3AED)
-private val EmeraldGreen = Color(0xFF10B981)
-private val AccentAmber = Color(0xFFF59E0B)
-private val AccentRed = Color(0xFFEF4444)
-private val TextPrimary = Color(0xFFF8FAFC)
-private val TextSecondary = Color(0xFF94A3B8)
-
-private enum class AppTab(val label: String) {
-    HOME("ראשי"),
-    MODELS("מודלים"),
-    TEST("בדיקה"),
-    SETTINGS("הגדרות")
-}
 
 private enum class PickerMode {
     NONE,
@@ -198,6 +143,7 @@ class MainActivity : ComponentActivity() {
     private var offlineOnlyMode by mutableStateOf(true)
     private var skipBrandNames by mutableStateOf(true)
     private var enableScanWave by mutableStateOf(true)
+    private var enableUiAnimations by mutableStateOf(true)
     private var statusMessage by mutableStateOf("מוכן להפעלה")
 
     // Sandbox text testing
@@ -276,9 +222,9 @@ class MainActivity : ComponentActivity() {
 
             MaterialTheme(
                 colorScheme = darkColorScheme(
-                    background = BgObsidian,
-                    surface = GlassCardBg,
-                    primary = ElectricBlue
+                    background = AppPalette.BgObsidian,
+                    surface = AppPalette.GlassCardBg,
+                    primary = AppPalette.ElectricBlue
                 )
             ) {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
@@ -304,6 +250,7 @@ class MainActivity : ComponentActivity() {
                         offlineOnlyMode = offlineOnlyMode,
                         skipBrandNames = skipBrandNames,
                         enableScanWave = enableScanWave,
+                        enableUiAnimations = enableUiAnimations,
                         statusMessage = statusMessage,
                         sampleInput = sampleInput,
                         sampleOutput = sampleOutput,
@@ -352,6 +299,10 @@ class MainActivity : ComponentActivity() {
                             enableScanWave = it
                             savePreferences()
                         },
+                        onToggleUiAnimations = {
+                            enableUiAnimations = it
+                            savePreferences()
+                        },
                         onClearCacheClick = {
                             translationEngine.clearCache()
                             statusMessage = "המטמון הזמני נוקה"
@@ -381,6 +332,7 @@ class MainActivity : ComponentActivity() {
                             },
                             downloadedCodes = downloadedLangCodes,
                             isSourceSelection = pickerMode == PickerMode.SOURCE,
+                            animationsEnabled = enableUiAnimations,
                             onDismiss = { pickerMode = PickerMode.NONE },
                             onSelect = { chosen ->
                                 if (pickerMode == PickerMode.SOURCE) {
@@ -431,6 +383,7 @@ class MainActivity : ComponentActivity() {
         offlineOnlyMode = prefs.getBoolean("offline_only", true)
         skipBrandNames = prefs.getBoolean("skip_brands", true)
         enableScanWave = prefs.getBoolean("scan_wave", true)
+        enableUiAnimations = prefs.getBoolean("ui_animations", true)
         sampleInput = sourceLang.samplePhrase
     }
 
@@ -442,6 +395,7 @@ class MainActivity : ComponentActivity() {
             .putBoolean("offline_only", offlineOnlyMode)
             .putBoolean("skip_brands", skipBrandNames)
             .putBoolean("scan_wave", enableScanWave)
+            .putBoolean("ui_animations", enableUiAnimations)
             .apply()
     }
 
@@ -944,7 +898,7 @@ class MainActivity : ComponentActivity() {
                 offlineOnly = offlineOnlyMode
             )
             val elapsed = System.currentTimeMillis() - startMs
-            if (elapsed < 350L) {
+            if (enableUiAnimations && elapsed < 350L) {
                 delay(350L - elapsed)
             }
             sampleOutput = if (translated.isNotEmpty()) {
@@ -1033,6 +987,7 @@ private fun ScreenTranslatorAppShell(
     offlineOnlyMode: Boolean,
     skipBrandNames: Boolean,
     enableScanWave: Boolean,
+    enableUiAnimations: Boolean,
     statusMessage: String,
     sampleInput: String,
     sampleOutput: String,
@@ -1064,6 +1019,7 @@ private fun ScreenTranslatorAppShell(
     onToggleOfflineOnly: (Boolean) -> Unit,
     onToggleSkipBrands: (Boolean) -> Unit,
     onToggleScanWave: (Boolean) -> Unit,
+    onToggleUiAnimations: (Boolean) -> Unit,
     onClearCacheClick: () -> Unit,
     onTestTranslationClick: () -> Unit,
     onGrantOverlayClick: () -> Unit,
@@ -1074,31 +1030,23 @@ private fun ScreenTranslatorAppShell(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(BgObsidianTop, BgObsidian, BgObsidian)
+                    colors = listOf(AppPalette.BgObsidianTop, AppPalette.BgObsidian, AppPalette.BgObsidian)
                 )
             )
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        ElectricBlue.copy(alpha = 0.11f),
-                        GlowPurple.copy(alpha = 0.05f),
-                        Color.Transparent
-                    ),
-                    center = Offset(size.width * 0.5f, size.height * 0.20f),
-                    radius = size.width * 0.78f
-                ),
-                center = Offset(size.width * 0.5f, size.height * 0.20f),
-                radius = size.width * 0.78f
-            )
-        }
+        ObsidianAmbientBackdrop(
+            isServiceActive = isServiceActive,
+            animationsEnabled = enableUiAnimations
+        )
 
         AnimatedContent(
             targetState = currentTab,
             transitionSpec = {
-                fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)) togetherWith
-                    fadeOut(animationSpec = tween(160))
+                AppMotion.tabTransition(
+                    fromTab = initialState,
+                    toTab = targetState,
+                    animationsEnabled = enableUiAnimations
+                )
             },
             label = "TabContent",
             modifier = Modifier
@@ -1116,6 +1064,7 @@ private fun ScreenTranslatorAppShell(
                     startInAutoMode = startInAutoMode,
                     offlineOnlyMode = offlineOnlyMode,
                     skipBrandNames = skipBrandNames,
+                    animationsEnabled = enableUiAnimations,
                     statusMessage = statusMessage,
                     onOpenModelsTab = { onTabSelected(AppTab.MODELS) },
                     onSwapLanguages = onSwapLanguages,
@@ -1139,6 +1088,7 @@ private fun ScreenTranslatorAppShell(
                     mlKitDownloadMessage = mlKitDownloadMessage,
                     fastPackUrlInput = fastPackUrlInput,
                     fastPackEntryCount = fastPackEntryCount,
+                    animationsEnabled = enableUiAnimations,
                     statusMessage = statusMessage,
                     onOpenSourcePicker = onOpenSourcePicker,
                     onOpenTargetPicker = onOpenTargetPicker,
@@ -1161,6 +1111,7 @@ private fun ScreenTranslatorAppShell(
                     mlKitDownloadMessage = mlKitDownloadMessage,
                     fastPackEntryCount = fastPackEntryCount,
                     offlineOnlyMode = offlineOnlyMode,
+                    animationsEnabled = enableUiAnimations,
                     sampleInput = sampleInput,
                     sampleOutput = sampleOutput,
                     isTestingTranslation = isTestingTranslation,
@@ -1189,10 +1140,12 @@ private fun ScreenTranslatorAppShell(
                     hasOverlayPermission = hasOverlayPermission,
                     hasNotificationPermission = hasNotificationPermission,
                     enableScanWave = enableScanWave,
+                    enableUiAnimations = enableUiAnimations,
                     skipBrandNames = skipBrandNames,
                     offlineOnlyMode = offlineOnlyMode,
                     onGrantOverlayClick = onGrantOverlayClick,
                     onToggleScanWave = onToggleScanWave,
+                    onToggleUiAnimations = onToggleUiAnimations,
                     onToggleSkipBrands = onToggleSkipBrands,
                     onToggleOfflineOnly = onToggleOfflineOnly
                 )
@@ -1202,6 +1155,7 @@ private fun ScreenTranslatorAppShell(
         FloatingGlassBottomBar(
             selectedTab = currentTab,
             onTabSelected = onTabSelected,
+            animationsEnabled = enableUiAnimations,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
@@ -1221,6 +1175,7 @@ private fun HomeTabScreen(
     startInAutoMode: Boolean,
     offlineOnlyMode: Boolean,
     skipBrandNames: Boolean,
+    animationsEnabled: Boolean,
     statusMessage: String,
     onOpenModelsTab: () -> Unit,
     onSwapLanguages: () -> Unit,
@@ -1242,50 +1197,62 @@ private fun HomeTabScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .staggeredEntrance(index = 0, enabled = animationsEnabled),
             verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
                     text = "מתרגם מסך",
-                    color = TextPrimary,
+                    color = AppPalette.TextPrimary,
                     fontSize = 27.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     text = "${sourceLang.nameHe} ← ${targetLang.nameHe} • ${if (offlineOnlyMode) "פרטיות מלאה" else "היברידי"}",
-                    color = TextSecondary,
+                    color = AppPalette.TextSecondary,
                     fontSize = 13.sp
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusPillBadge(
+                    PulsingStatusPill(
                         label = when {
                             isServiceActive -> "פעיל"
                             isPairModelReady -> "מוכן"
                             else -> statusMessage
                         },
                         color = when {
-                            isServiceActive -> EmeraldGreen
-                            isPairModelReady -> EmeraldGreen
-                            else -> AccentAmber
-                        }
+                            isServiceActive -> AppPalette.EmeraldGreen
+                            isPairModelReady -> AppPalette.EmeraldGreen
+                            else -> AppPalette.AccentAmber
+                        },
+                        pulsing = isServiceActive,
+                        animationsEnabled = animationsEnabled
                     )
-                    StatusPillBadge(
+                    PulsingStatusPill(
                         label = "שנה שפות",
-                        color = ElectricBlueLight,
-                        modifier = Modifier.clickable { onOpenModelsTab() }
+                        color = AppPalette.ElectricBlueLight,
+                        animationsEnabled = animationsEnabled,
+                        modifier = Modifier.tactilePress(
+                            animationsEnabled = animationsEnabled,
+                            onClick = onOpenModelsTab
+                        )
                     )
                 }
             }
 
-            StatusPillBadge(
+            PulsingStatusPill(
                 label = if (hasOverlayPermission) "מאושר" else "נדרש אישור",
-                color = if (hasOverlayPermission) EmeraldGreen else AccentRed,
-                modifier = Modifier.clickable {
-                    if (!hasOverlayPermission) onGrantOverlayClick()
-                }
+                color = if (hasOverlayPermission) AppPalette.EmeraldGreen else AppPalette.AccentRed,
+                pulsing = !hasOverlayPermission,
+                animationsEnabled = animationsEnabled,
+                modifier = Modifier.tactilePress(
+                    enabled = !hasOverlayPermission,
+                    animationsEnabled = animationsEnabled,
+                    onClick = onGrantOverlayClick
+                )
             )
         }
 
@@ -1293,9 +1260,10 @@ private fun HomeTabScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .staggeredEntrance(index = 1, enabled = animationsEnabled)
                     .clip(RoundedCornerShape(16.dp))
-                    .background(AccentAmber.copy(alpha = 0.12f))
-                    .border(1.dp, AccentAmber.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
+                    .background(AppPalette.AccentAmber.copy(alpha = 0.12f))
+                    .border(1.dp, AppPalette.AccentAmber.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -1310,10 +1278,13 @@ private fun HomeTabScreen(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = "החלף ⇄",
-                    color = ElectricCyan,
+                    color = AppPalette.ElectricCyan,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.clickable { onSwapLanguages() }
+                    modifier = Modifier.tactilePress(
+                        animationsEnabled = animationsEnabled,
+                        onClick = onSwapLanguages
+                    )
                 )
             }
         }
@@ -1321,16 +1292,22 @@ private fun HomeTabScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .staggeredEntrance(index = 1, enabled = animationsEnabled)
                 .padding(vertical = 4.dp),
             contentAlignment = Alignment.Center
         ) {
             HeroPowerButton(
                 isServiceActive = isServiceActive,
+                animationsEnabled = animationsEnabled,
                 onClick = onPowerButtonClick
             )
         }
 
-        GlassCard(flashTrigger = autoCardFlash) {
+        AnimatedGlassCard(
+            staggerIndex = 2,
+            animationsEnabled = animationsEnabled,
+            flashTrigger = autoCardFlash
+        ) {
             GlassToggleRow(
                 title = "זיהוי שינויים אוטומטי",
                 subtitle = "מתרגם אוטומטית רק אזורים שהשתנו ומנקה במעבר מסך",
@@ -1342,7 +1319,11 @@ private fun HomeTabScreen(
             )
         }
 
-        GlassCard(flashTrigger = privacyCardFlash) {
+        AnimatedGlassCard(
+            staggerIndex = 3,
+            animationsEnabled = animationsEnabled,
+            flashTrigger = privacyCardFlash
+        ) {
             GlassToggleRow(
                 title = "דלג על שמות אפליקציות ומותגים",
                 subtitle = "מונע תרגומים מילוליים כמו Gemini, Waze ו-Spotify",
@@ -1355,7 +1336,7 @@ private fun HomeTabScreen(
             HorizontalDivider(
                 modifier = Modifier.padding(vertical = 14.dp),
                 thickness = 1.dp,
-                color = GlassBorder
+                color = AppPalette.GlassBorder
             )
             GlassToggleRow(
                 title = "מצב לא-מקוון בלבד (פרטיות מרבית)",
@@ -1384,6 +1365,7 @@ private fun ModelsTabScreen(
     mlKitDownloadMessage: String,
     fastPackUrlInput: String,
     fastPackEntryCount: Int,
+    animationsEnabled: Boolean,
     statusMessage: String,
     onOpenSourcePicker: () -> Unit,
     onOpenTargetPicker: () -> Unit,
@@ -1404,24 +1386,27 @@ private fun ModelsTabScreen(
             .padding(top = 18.dp, bottom = 108.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(
+            modifier = Modifier.staggeredEntrance(index = 0, enabled = animationsEnabled),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Text(
                 text = "שפות ומודלים",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 26.sp,
                 fontWeight = FontWeight.Bold
             )
             Text(
                 text = "בחר שפת מקור ויעד להורדה מהירה של מודלים תומכים",
-                color = TextSecondary,
+                color = AppPalette.TextSecondary,
                 fontSize = 13.sp
             )
         }
 
-        GlassCard {
+        AnimatedGlassCard(staggerIndex = 1, animationsEnabled = animationsEnabled) {
             Text(
                 text = "בחירת שפות תרגום",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -1429,6 +1414,7 @@ private fun ModelsTabScreen(
             LanguagePairSelectorRow(
                 sourceLang = sourceLang,
                 targetLang = targetLang,
+                animationsEnabled = animationsEnabled,
                 onOpenSourcePicker = onOpenSourcePicker,
                 onOpenTargetPicker = onOpenTargetPicker,
                 onSwapLanguages = onSwapLanguages
@@ -1446,15 +1432,19 @@ private fun ModelsTabScreen(
 
         Text(
             text = "מודלים תומכים עבור ${sourceLang.nameHe} ← ${targetLang.nameHe}",
-            color = TextSecondary,
+            color = AppPalette.TextSecondary,
             fontSize = 13.sp,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.staggeredEntrance(index = 2, enabled = animationsEnabled)
         )
 
-        supportedModels.forEach { model ->
+        supportedModels.forEachIndexed { idx, model ->
             when (model.kind) {
                 ModelKind.MLKIT_NEURAL_OFFLINE -> {
-                    GlassCard {
+                    AnimatedGlassCard(
+                        staggerIndex = 2 + idx,
+                        animationsEnabled = animationsEnabled
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1463,34 +1453,36 @@ private fun ModelsTabScreen(
                             Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                 Text(
                                     text = model.titleHe,
-                                    color = TextPrimary,
+                                    color = AppPalette.TextPrimary,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
                                     text = model.approxSizeLabel,
-                                    color = ElectricCyan,
+                                    color = AppPalette.ElectricCyan,
                                     fontSize = 12.sp
                                 )
                             }
-                            StatusPillBadge(
+                            PulsingStatusPill(
                                 label = when {
                                     isDownloadingMlKit -> "מוריד..."
                                     isPairModelReady -> "מותקן"
                                     else -> "זמין להורדה"
                                 },
                                 color = when {
-                                    isDownloadingMlKit -> ElectricCyan
-                                    isPairModelReady -> EmeraldGreen
-                                    else -> AccentAmber
-                                }
+                                    isDownloadingMlKit -> AppPalette.ElectricCyan
+                                    isPairModelReady -> AppPalette.EmeraldGreen
+                                    else -> AppPalette.AccentAmber
+                                },
+                                pulsing = isDownloadingMlKit,
+                                animationsEnabled = animationsEnabled
                             )
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = model.subtitleHe,
-                            color = TextSecondary,
+                            color = AppPalette.TextSecondary,
                             fontSize = 12.sp,
                             lineHeight = 18.sp
                         )
@@ -1507,7 +1499,8 @@ private fun ModelsTabScreen(
                                 speedBytesPerSec = 0L,
                                 labelHe = mlKitDownloadMessage.ifEmpty {
                                     if (isPairModelReady) "מודל לא-מקוון מוכן לשימוש" else "ממתין להורדה"
-                                }
+                                },
+                                animationsEnabled = animationsEnabled
                             )
                         }
 
@@ -1524,7 +1517,7 @@ private fun ModelsTabScreen(
                                     .height(44.dp),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isPairModelReady) Color(0xFF232B3E) else ElectricBlue
+                                    containerColor = if (isPairModelReady) Color(0xFF232B3E) else AppPalette.ElectricBlue
                                 )
                             ) {
                                 Text(
@@ -1544,9 +1537,9 @@ private fun ModelsTabScreen(
                                     onClick = onDeleteMlKitTargetClick,
                                     modifier = Modifier.height(44.dp),
                                     shape = RoundedCornerShape(14.dp),
-                                    border = BorderStroke(1.dp, AccentRed.copy(alpha = 0.45f)),
+                                    border = BorderStroke(1.dp, AppPalette.AccentRed.copy(alpha = 0.45f)),
                                     colors = ButtonDefaults.outlinedButtonColors(
-                                        containerColor = AccentRed.copy(alpha = 0.10f)
+                                        containerColor = AppPalette.AccentRed.copy(alpha = 0.10f)
                                     )
                                 ) {
                                     Text("מחק", color = Color(0xFFFCA5A5), fontSize = 13.sp)
@@ -1563,7 +1556,10 @@ private fun ModelsTabScreen(
                         dlState.status == DownloadStatus.VERIFYING
                     val isPackInstalled = dlState.status == DownloadStatus.COMPLETED || fastPackEntryCount > 0
 
-                    GlassCard {
+                    AnimatedGlassCard(
+                        staggerIndex = 2 + idx,
+                        animationsEnabled = animationsEnabled
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1572,17 +1568,17 @@ private fun ModelsTabScreen(
                             Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                 Text(
                                     text = model.titleHe,
-                                    color = TextPrimary,
+                                    color = AppPalette.TextPrimary,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
                                     text = "האצת הורדה • 60 חלקים מקבילים (HTTP Range)",
-                                    color = ElectricCyan,
+                                    color = AppPalette.ElectricCyan,
                                     fontSize = 12.sp
                                 )
                             }
-                            StatusPillBadge(
+                            PulsingStatusPill(
                                 label = when {
                                     isBusyDl -> "${(dlState.progress * 100).roundToInt()}%"
                                     fastPackEntryCount > 0 -> "$fastPackEntryCount מונחים"
@@ -1590,17 +1586,19 @@ private fun ModelsTabScreen(
                                     else -> "60 חלקים"
                                 },
                                 color = when {
-                                    isBusyDl -> ElectricCyan
-                                    isPackInstalled -> EmeraldGreen
-                                    else -> GlowPurple
-                                }
+                                    isBusyDl -> AppPalette.ElectricCyan
+                                    isPackInstalled -> AppPalette.EmeraldGreen
+                                    else -> AppPalette.GlowPurple
+                                },
+                                pulsing = isBusyDl,
+                                animationsEnabled = animationsEnabled
                             )
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = model.subtitleHe,
-                            color = TextSecondary,
+                            color = AppPalette.TextSecondary,
                             fontSize = 12.sp,
                             lineHeight = 18.sp
                         )
@@ -1616,19 +1614,19 @@ private fun ModelsTabScreen(
                                 placeholder = {
                                     Text(
                                         "https://example.com/pack_${sourceLang.code}_${targetLang.code}.json",
-                                        color = TextSecondary.copy(alpha = 0.65f),
+                                        color = AppPalette.TextSecondary.copy(alpha = 0.65f),
                                         fontSize = 12.sp
                                     )
                                 },
                                 shape = RoundedCornerShape(12.dp),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = GlassCardInner,
-                                    unfocusedContainerColor = GlassCardInner,
-                                    focusedBorderColor = ElectricCyan.copy(alpha = 0.7f),
-                                    unfocusedBorderColor = GlassBorder,
-                                    focusedTextColor = TextPrimary,
-                                    unfocusedTextColor = TextPrimary,
-                                    cursorColor = ElectricCyan
+                                    focusedContainerColor = AppPalette.GlassCardInner,
+                                    unfocusedContainerColor = AppPalette.GlassCardInner,
+                                    focusedBorderColor = AppPalette.ElectricCyan.copy(alpha = 0.7f),
+                                    unfocusedBorderColor = AppPalette.GlassBorder,
+                                    focusedTextColor = AppPalette.TextPrimary,
+                                    unfocusedTextColor = AppPalette.TextPrimary,
+                                    cursorColor = AppPalette.ElectricCyan
                                 )
                             )
                         }
@@ -1644,6 +1642,7 @@ private fun ModelsTabScreen(
                                 totalParts = dlState.totalParts,
                                 speedBytesPerSec = dlState.speedBytesPerSec,
                                 labelHe = dlState.messageHe.ifEmpty { "מוכן" },
+                                animationsEnabled = animationsEnabled,
                                 isError = dlState.status == DownloadStatus.FAILED
                             )
                         }
@@ -1660,9 +1659,9 @@ private fun ModelsTabScreen(
                                         .weight(1f)
                                         .height(44.dp),
                                     shape = RoundedCornerShape(14.dp),
-                                    border = BorderStroke(1.dp, AccentAmber.copy(alpha = 0.5f)),
+                                    border = BorderStroke(1.dp, AppPalette.AccentAmber.copy(alpha = 0.5f)),
                                     colors = ButtonDefaults.outlinedButtonColors(
-                                        containerColor = AccentAmber.copy(alpha = 0.12f)
+                                        containerColor = AppPalette.AccentAmber.copy(alpha = 0.12f)
                                     )
                                 ) {
                                     Text("בטל הורדה", color = Color(0xFFFDE68A), fontSize = 13.sp)
@@ -1674,7 +1673,7 @@ private fun ModelsTabScreen(
                                         .weight(1f)
                                         .height(44.dp),
                                     shape = RoundedCornerShape(14.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
+                                    colors = ButtonDefaults.buttonColors(containerColor = AppPalette.ElectricBlue)
                                 ) {
                                     Text(
                                         text = "הורד ב-60 חלקים",
@@ -1689,9 +1688,9 @@ private fun ModelsTabScreen(
                                         onClick = { onDeleteFastPackClick(model.id) },
                                         modifier = Modifier.height(44.dp),
                                         shape = RoundedCornerShape(14.dp),
-                                        border = BorderStroke(1.dp, AccentRed.copy(alpha = 0.45f)),
+                                        border = BorderStroke(1.dp, AppPalette.AccentRed.copy(alpha = 0.45f)),
                                         colors = ButtonDefaults.outlinedButtonColors(
-                                            containerColor = AccentRed.copy(alpha = 0.10f)
+                                            containerColor = AppPalette.AccentRed.copy(alpha = 0.10f)
                                         )
                                     ) {
                                         Text("מחק", color = Color(0xFFFCA5A5), fontSize = 13.sp)
@@ -1704,10 +1703,10 @@ private fun ModelsTabScreen(
             }
         }
 
-        GlassCard {
+        AnimatedGlassCard(staggerIndex = 4, animationsEnabled = animationsEnabled) {
             Text(
                 text = "שפות מותקנות במכשיר (${downloadedLangCodes.size})",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -1719,7 +1718,7 @@ private fun ModelsTabScreen(
             }
             Text(
                 text = installedNames,
-                color = TextSecondary,
+                color = AppPalette.TextSecondary,
                 fontSize = 13.sp,
                 lineHeight = 19.sp
             )
@@ -1730,16 +1729,16 @@ private fun ModelsTabScreen(
                     .fillMaxWidth()
                     .height(42.dp),
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, GlassBorder),
+                border = BorderStroke(1.dp, AppPalette.GlassBorder),
                 colors = ButtonDefaults.outlinedButtonColors(
                     containerColor = Color.White.copy(alpha = 0.03f)
                 )
             ) {
-                Text("נקה מטמון זיכרון זמני", color = TextPrimary, fontSize = 13.sp)
+                Text("נקה מטמון זיכרון זמני", color = AppPalette.TextPrimary, fontSize = 13.sp)
             }
             if (statusMessage.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(text = statusMessage, color = TextSecondary, fontSize = 12.sp)
+                Text(text = statusMessage, color = AppPalette.TextSecondary, fontSize = 12.sp)
             }
         }
     }
@@ -1755,6 +1754,7 @@ private fun TestTabScreen(
     mlKitDownloadMessage: String,
     fastPackEntryCount: Int,
     offlineOnlyMode: Boolean,
+    animationsEnabled: Boolean,
     sampleInput: String,
     sampleOutput: String,
     isTestingTranslation: Boolean,
@@ -1789,32 +1789,36 @@ private fun TestTabScreen(
             .padding(top = 18.dp, bottom = 108.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(
+            modifier = Modifier.staggeredEntrance(index = 0, enabled = animationsEnabled),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Text(
                 text = "מודל ובדיקת איכות",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 26.sp,
                 fontWeight = FontWeight.Bold
             )
             Text(
                 text = "${sourceLang.nameHe} ← ${targetLang.nameHe} • בדיקת טקסט ותמונות",
-                color = TextSecondary,
+                color = AppPalette.TextSecondary,
                 fontSize = 13.sp
             )
         }
 
-        GlassCard {
+        AnimatedGlassCard(staggerIndex = 1, animationsEnabled = animationsEnabled) {
             LanguagePairSelectorRow(
                 sourceLang = sourceLang,
                 targetLang = targetLang,
+                animationsEnabled = animationsEnabled,
                 onOpenSourcePicker = onOpenSourcePicker,
                 onOpenTargetPicker = onOpenTargetPicker,
                 onSwapLanguages = onSwapLanguages
             )
         }
 
-        // Image Upload & Visual Translation Card
-        GlassCard {
+        // Image Upload & Visual Translation Card with Laser Scanner
+        AnimatedGlassCard(staggerIndex = 2, animationsEnabled = animationsEnabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1823,23 +1827,25 @@ private fun TestTabScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "תרגום תמונה מהגלריה",
-                        color = TextPrimary,
+                        color = AppPalette.TextPrimary,
                         fontSize = 17.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
                         text = "העלה צילום מסך או תמונה ותראה את התרגום מוטמע ישירות עליה",
-                        color = TextSecondary,
+                        color = AppPalette.TextSecondary,
                         fontSize = 12.sp
                     )
                 }
                 if (translatedPreviewBitmap != null) {
-                    StatusPillBadge(
+                    PulsingStatusPill(
                         label = if (showOriginalImage) "מקור" else "מתורגם",
-                        color = if (showOriginalImage) AccentAmber else EmeraldGreen,
-                        modifier = Modifier.clickable {
-                            onToggleShowOriginalImage(!showOriginalImage)
-                        }
+                        color = if (showOriginalImage) AppPalette.AccentAmber else AppPalette.EmeraldGreen,
+                        animationsEnabled = animationsEnabled,
+                        modifier = Modifier.tactilePress(
+                            animationsEnabled = animationsEnabled,
+                            onClick = { onToggleShowOriginalImage(!showOriginalImage) }
+                        )
                     )
                 }
             }
@@ -1858,38 +1864,32 @@ private fun TestTabScreen(
                         .fillMaxWidth()
                         .heightIn(min = 180.dp, max = 380.dp)
                         .clip(RoundedCornerShape(16.dp))
-                        .background(GlassCardInner)
-                        .border(1.dp, GlassBorder, RoundedCornerShape(16.dp)),
+                        .background(AppPalette.GlassCardInner)
+                        .border(1.dp, AppPalette.GlassBorder, RoundedCornerShape(16.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        bitmap = activeBitmap,
-                        contentDescription = "תמונה מתורגמת",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    AnimatedContent(
+                        targetState = showOriginalImage to activeBitmap,
+                        transitionSpec = {
+                            fadeIn(tween(if (animationsEnabled) 260 else 1)) togetherWith
+                                fadeOut(tween(if (animationsEnabled) 180 else 1))
+                        },
+                        label = "ImageCompareCrossfade"
+                    ) { (_, bmp) ->
+                        Image(
+                            bitmap = bmp,
+                            contentDescription = "תמונה מתורגמת",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
                     if (isTranslatingImage) {
-                        Box(
-                            modifier = Modifier
-                                .matchParentSize()
-                                .background(BgObsidian.copy(alpha = 0.65f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(28.dp),
-                                    color = ElectricCyan,
-                                    strokeWidth = 2.5.dp
-                                )
-                                Text(
-                                    text = imageTranslationStatus.ifEmpty { "מתרגם תמונה..." },
-                                    color = TextPrimary,
-                                    fontSize = 13.sp
-                                )
-                            }
+                        Box(modifier = Modifier.matchParentSize()) {
+                            ImageScanLaserOverlay(
+                                statusText = imageTranslationStatus,
+                                animationsEnabled = animationsEnabled
+                            )
                         }
                     }
                 }
@@ -1899,7 +1899,7 @@ private fun TestTabScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = imageTranslationStatus,
-                    color = if (translatedPreviewBitmap != null) EmeraldGreen else TextSecondary,
+                    color = if (translatedPreviewBitmap != null) AppPalette.EmeraldGreen else AppPalette.TextSecondary,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
                 )
@@ -1918,7 +1918,7 @@ private fun TestTabScreen(
                         .weight(1f)
                         .height(46.dp),
                     shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
+                    colors = ButtonDefaults.buttonColors(containerColor = AppPalette.ElectricBlue)
                 ) {
                     Text(
                         text = if (hasSelectedImage) "העלה תמונה אחרת" else "העלה תמונה לתרגום",
@@ -1933,54 +1933,55 @@ private fun TestTabScreen(
                         onClick = onRetranslateImageClick,
                         modifier = Modifier.height(46.dp),
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
+                        border = BorderStroke(1.dp, AppPalette.ElectricCyan.copy(alpha = 0.45f)),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = ElectricCyan.copy(alpha = 0.10f)
+                            containerColor = AppPalette.ElectricCyan.copy(alpha = 0.10f)
                         )
                     ) {
-                        Text("תרגם שוב", color = ElectricCyan, fontSize = 13.sp)
+                        Text("תרגם שוב", color = AppPalette.ElectricCyan, fontSize = 13.sp)
                     }
 
                     OutlinedButton(
                         onClick = onClearImageClick,
                         modifier = Modifier.height(46.dp),
                         shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, GlassBorder),
+                        border = BorderStroke(1.dp, AppPalette.GlassBorder),
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = Color.White.copy(alpha = 0.04f)
                         )
                     ) {
-                        Text("נקה", color = TextSecondary, fontSize = 13.sp)
+                        Text("נקה", color = AppPalette.TextSecondary, fontSize = 13.sp)
                     }
                 }
             }
 
             if (imageTranslatedEntries.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider(thickness = 1.dp, color = GlassBorder)
+                HorizontalDivider(thickness = 1.dp, color = AppPalette.GlassBorder)
                 Spacer(modifier = Modifier.height(10.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    imageTranslatedEntries.take(8).forEach { entry ->
+                    imageTranslatedEntries.take(8).forEachIndexed { entryIdx, entry ->
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .staggeredEntrance(index = entryIdx, enabled = animationsEnabled)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(GlassCardInner)
-                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                                .background(AppPalette.GlassCardInner)
+                                .border(1.dp, AppPalette.GlassBorder, RoundedCornerShape(12.dp))
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
                             CompositionLocalProvider(LocalLayoutDirection provides inputDir) {
                                 Text(
                                     text = entry.sourceText,
-                                    color = TextSecondary,
+                                    color = AppPalette.TextSecondary,
                                     fontSize = 12.sp
                                 )
                             }
                             CompositionLocalProvider(LocalLayoutDirection provides outputDir) {
                                 Text(
                                     text = entry.translatedText,
-                                    color = TextPrimary,
+                                    color = AppPalette.TextPrimary,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -1999,10 +2000,12 @@ private fun TestTabScreen(
             progress = mlKitDownloadProgress,
             statusNote = mlKitDownloadMessage,
             fastPackEntryCount = fastPackEntryCount,
+            animationsEnabled = animationsEnabled,
+            staggerIndex = 3,
             onDownloadModelClick = onDownloadMlKitClick
         )
 
-        GlassCard {
+        AnimatedGlassCard(staggerIndex = 4, animationsEnabled = animationsEnabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2010,19 +2013,24 @@ private fun TestTabScreen(
             ) {
                 Text(
                     text = "בדיקת תרגום טקסט",
-                    color = TextPrimary,
+                    color = AppPalette.TextPrimary,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusPillBadge(
+                    PulsingStatusPill(
                         label = "דוגמה",
-                        color = ElectricBlueLight,
-                        modifier = Modifier.clickable { onResetSamplePhrase() }
+                        color = AppPalette.ElectricBlueLight,
+                        animationsEnabled = animationsEnabled,
+                        modifier = Modifier.tactilePress(
+                            animationsEnabled = animationsEnabled,
+                            onClick = onResetSamplePhrase
+                        )
                     )
-                    StatusPillBadge(
+                    PulsingStatusPill(
                         label = if (offlineOnlyMode) "מקומי" else "היברידי",
-                        color = ElectricCyan
+                        color = AppPalette.ElectricCyan,
+                        animationsEnabled = animationsEnabled
                     )
                 }
             }
@@ -2035,19 +2043,19 @@ private fun TestTabScreen(
                     onValueChange = onSampleInputChange,
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = {
-                        Text("הזן טקסט ב${sourceLang.nameHe}...", color = TextSecondary)
+                        Text("הזן טקסט ב${sourceLang.nameHe}...", color = AppPalette.TextSecondary)
                     },
                     singleLine = false,
                     minLines = 2,
                     shape = RoundedCornerShape(14.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = GlassCardInner,
-                        unfocusedContainerColor = GlassCardInner,
-                        focusedBorderColor = ElectricBlue.copy(alpha = 0.7f),
-                        unfocusedBorderColor = GlassBorder,
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        cursorColor = ElectricBlue
+                        focusedContainerColor = AppPalette.GlassCardInner,
+                        unfocusedContainerColor = AppPalette.GlassCardInner,
+                        focusedBorderColor = AppPalette.ElectricBlue.copy(alpha = 0.7f),
+                        unfocusedBorderColor = AppPalette.GlassBorder,
+                        focusedTextColor = AppPalette.TextPrimary,
+                        unfocusedTextColor = AppPalette.TextPrimary,
+                        cursorColor = AppPalette.ElectricBlue
                     )
                 )
             }
@@ -2058,7 +2066,10 @@ private fun TestTabScreen(
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
-                GlowingDownArrow(active = isTestingTranslation || sampleOutput.isNotEmpty())
+                GlowingDownArrow(
+                    active = isTestingTranslation || sampleOutput.isNotEmpty(),
+                    animationsEnabled = animationsEnabled
+                )
             }
 
             CompositionLocalProvider(LocalLayoutDirection provides outputDir) {
@@ -2066,7 +2077,8 @@ private fun TestTabScreen(
                     isLoading = isTestingTranslation,
                     translatedText = sampleOutput,
                     placeholderText = "התרגום ל${targetLang.nameHe} יופיע כאן בזמן אמת",
-                    revealKey = translationRevealKey
+                    revealKey = translationRevealKey,
+                    animationsEnabled = animationsEnabled
                 )
             }
 
@@ -2080,8 +2092,8 @@ private fun TestTabScreen(
                     .height(48.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = ElectricBlue,
-                    disabledContainerColor = ElectricBlue.copy(alpha = 0.5f)
+                    containerColor = AppPalette.ElectricBlue,
+                    disabledContainerColor = AppPalette.ElectricBlue.copy(alpha = 0.5f)
                 )
             ) {
                 if (isTestingTranslation) {
@@ -2110,10 +2122,12 @@ private fun SettingsTabScreen(
     hasOverlayPermission: Boolean,
     hasNotificationPermission: Boolean,
     enableScanWave: Boolean,
+    enableUiAnimations: Boolean,
     skipBrandNames: Boolean,
     offlineOnlyMode: Boolean,
     onGrantOverlayClick: () -> Unit,
     onToggleScanWave: (Boolean) -> Unit,
+    onToggleUiAnimations: (Boolean) -> Unit,
     onToggleSkipBrands: (Boolean) -> Unit,
     onToggleOfflineOnly: (Boolean) -> Unit
 ) {
@@ -2128,24 +2142,27 @@ private fun SettingsTabScreen(
             .padding(top = 18.dp, bottom = 108.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(
+            modifier = Modifier.staggeredEntrance(index = 0, enabled = enableUiAnimations),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
             Text(
                 text = "הגדרות",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 26.sp,
                 fontWeight = FontWeight.Bold
             )
             Text(
                 text = "הרשאות, אפקטים והתאמת שכבת התרגום",
-                color = TextSecondary,
+                color = AppPalette.TextSecondary,
                 fontSize = 13.sp
             )
         }
 
-        GlassCard {
+        AnimatedGlassCard(staggerIndex = 1, animationsEnabled = enableUiAnimations) {
             Text(
                 text = "הרשאות מערכת",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -2156,16 +2173,18 @@ private fun SettingsTabScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("תצוגה מעל אפליקציות", color = TextPrimary, fontSize = 14.sp)
+                    Text("תצוגה מעל אפליקציות", color = AppPalette.TextPrimary, fontSize = 14.sp)
                     Text(
                         "נדרש להצגת התרגום ולשונית הצד מעל מסכים אחרים",
-                        color = TextSecondary,
+                        color = AppPalette.TextSecondary,
                         fontSize = 12.sp
                     )
                 }
-                StatusPillBadge(
+                PulsingStatusPill(
                     label = if (hasOverlayPermission) "מאושר" else "חסר",
-                    color = if (hasOverlayPermission) EmeraldGreen else AccentRed
+                    color = if (hasOverlayPermission) AppPalette.EmeraldGreen else AppPalette.AccentRed,
+                    pulsing = !hasOverlayPermission,
+                    animationsEnabled = enableUiAnimations
                 )
             }
             Spacer(modifier = Modifier.height(10.dp))
@@ -2175,16 +2194,17 @@ private fun SettingsTabScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("התראת שירות פעיל", color = TextPrimary, fontSize = 14.sp)
+                    Text("התראת שירות פעיל", color = AppPalette.TextPrimary, fontSize = 14.sp)
                     Text(
                         "מציגה חיווי קבוע כשהמתרגם רץ ברקע",
-                        color = TextSecondary,
+                        color = AppPalette.TextSecondary,
                         fontSize = 12.sp
                     )
                 }
-                StatusPillBadge(
+                PulsingStatusPill(
                     label = if (hasNotificationPermission) "מאושר" else "חסר",
-                    color = if (hasNotificationPermission) EmeraldGreen else AccentAmber
+                    color = if (hasNotificationPermission) AppPalette.EmeraldGreen else AppPalette.AccentAmber,
+                    animationsEnabled = enableUiAnimations
                 )
             }
             Spacer(modifier = Modifier.height(14.dp))
@@ -2194,30 +2214,48 @@ private fun SettingsTabScreen(
                     .fillMaxWidth()
                     .height(44.dp),
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.45f)),
+                border = BorderStroke(1.dp, AppPalette.ElectricBlue.copy(alpha = 0.45f)),
                 colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = ElectricBlue.copy(alpha = 0.08f)
+                    containerColor = AppPalette.ElectricBlue.copy(alpha = 0.08f)
                 )
             ) {
                 Text(
                     text = if (hasOverlayPermission) "פתח הגדרות תצוגה צפה" else "אשר תצוגה מעל אפליקציות",
-                    color = ElectricBlueLight,
+                    color = AppPalette.ElectricBlueLight,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium
                 )
             }
         }
 
-        GlassCard(flashTrigger = visualCardFlash) {
+        AnimatedGlassCard(
+            staggerIndex = 2,
+            animationsEnabled = enableUiAnimations,
+            flashTrigger = visualCardFlash
+        ) {
             Text(
-                text = "אנימציות שכבת התרגום",
-                color = TextPrimary,
+                text = "אנימציות ואפקטים",
+                color = AppPalette.TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(modifier = Modifier.height(12.dp))
             GlassToggleRow(
-                title = "גל סריקה כחול-טורקיז",
+                title = "אנימציות ואפקטים מלאים בממשק",
+                subtitle = "רקע Aurora, חלקיקי אור, כניסה מדורגת לכרטיסיות ולייזר סריקה לתמונות",
+                checked = enableUiAnimations,
+                onCheckedChange = {
+                    visualCardFlash++
+                    onToggleUiAnimations(it)
+                }
+            )
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 14.dp),
+                thickness = 1.dp,
+                color = AppPalette.GlassBorder
+            )
+            GlassToggleRow(
+                title = "גל סריקה כחול-טורקיז במסך",
                 subtitle = "פס אור שוטף את המסך וחושף את התרגום ב-Crossfade כשהגל עובר",
                 checked = enableScanWave,
                 onCheckedChange = {
@@ -2227,10 +2265,14 @@ private fun SettingsTabScreen(
             )
         }
 
-        GlassCard(flashTrigger = filterCardFlash) {
+        AnimatedGlassCard(
+            staggerIndex = 3,
+            animationsEnabled = enableUiAnimations,
+            flashTrigger = filterCardFlash
+        ) {
             Text(
                 text = "סינון ופרטיות",
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -2247,7 +2289,7 @@ private fun SettingsTabScreen(
             HorizontalDivider(
                 modifier = Modifier.padding(vertical = 14.dp),
                 thickness = 1.dp,
-                color = GlassBorder
+                color = AppPalette.GlassBorder
             )
             GlassToggleRow(
                 title = "מצב לא-מקוון בלבד",
@@ -2266,12 +2308,11 @@ private fun SettingsTabScreen(
 private fun LanguagePairSelectorRow(
     sourceLang: LanguageOption,
     targetLang: LanguageOption,
+    animationsEnabled: Boolean,
     onOpenSourcePicker: () -> Unit,
     onOpenTargetPicker: () -> Unit,
     onSwapLanguages: () -> Unit
 ) {
-    val view = LocalView.current
-
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -2280,33 +2321,20 @@ private fun LanguagePairSelectorRow(
         LanguageChipButton(
             roleLabel = "שפת מקור",
             lang = sourceLang,
+            animationsEnabled = animationsEnabled,
             onClick = onOpenSourcePicker,
             modifier = Modifier.weight(1f)
         )
 
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(ElectricBlue.copy(alpha = 0.16f))
-                .border(1.dp, ElectricBlueLight.copy(alpha = 0.35f), CircleShape)
-                .clickable {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                    onSwapLanguages()
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "⇄",
-                color = ElectricBlueLight,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
+        AnimatedSwapButton(
+            animationsEnabled = animationsEnabled,
+            onClick = onSwapLanguages
+        )
 
         LanguageChipButton(
             roleLabel = "שפת יעד",
             lang = targetLang,
+            animationsEnabled = animationsEnabled,
             onClick = onOpenTargetPicker,
             modifier = Modifier.weight(1f)
         )
@@ -2317,26 +2345,27 @@ private fun LanguagePairSelectorRow(
 private fun LanguageChipButton(
     roleLabel: String,
     lang: LanguageOption,
+    animationsEnabled: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
         modifier = modifier
+            .tactilePress(animationsEnabled = animationsEnabled, onClick = onClick)
             .clip(RoundedCornerShape(14.dp))
-            .background(GlassCardInner)
-            .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
-            .clickable { onClick() }
+            .background(AppPalette.GlassCardInner)
+            .border(1.dp, AppPalette.GlassBorder, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Text(
             text = roleLabel,
-            color = TextSecondary,
+            color = AppPalette.TextSecondary,
             fontSize = 11.sp
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = lang.nameHe,
-            color = TextPrimary,
+            color = AppPalette.TextPrimary,
             fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -2344,7 +2373,7 @@ private fun LanguageChipButton(
         )
         Text(
             text = lang.nativeName,
-            color = ElectricCyan.copy(alpha = 0.85f),
+            color = AppPalette.ElectricCyan.copy(alpha = 0.85f),
             fontSize = 11.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -2358,6 +2387,7 @@ private fun LanguagePickerDialog(
     selectedCode: String,
     downloadedCodes: Set<String>,
     isSourceSelection: Boolean,
+    animationsEnabled: Boolean,
     onDismiss: () -> Unit,
     onSelect: (LanguageOption) -> Unit
 ) {
@@ -2379,6 +2409,7 @@ private fun LanguagePickerDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .staggeredEntrance(index = 0, enabled = animationsEnabled)
                 .clip(RoundedCornerShape(24.dp))
                 .background(Color(0xF5121726))
                 .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(24.dp))
@@ -2391,15 +2422,18 @@ private fun LanguagePickerDialog(
             ) {
                 Text(
                     text = titleHe,
-                    color = TextPrimary,
+                    color = AppPalette.TextPrimary,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
                     text = "סגור",
-                    color = ElectricBlueLight,
+                    color = AppPalette.ElectricBlueLight,
                     fontSize = 13.sp,
-                    modifier = Modifier.clickable { onDismiss() }
+                    modifier = Modifier.tactilePress(
+                        animationsEnabled = animationsEnabled,
+                        onClick = onDismiss
+                    )
                 )
             }
 
@@ -2410,15 +2444,15 @@ private fun LanguagePickerDialog(
                 onValueChange = { searchQuery = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                placeholder = { Text("חפש שפה...", color = TextSecondary, fontSize = 13.sp) },
+                placeholder = { Text("חפש שפה...", color = AppPalette.TextSecondary, fontSize = 13.sp) },
                 shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = GlassCardInner,
-                    unfocusedContainerColor = GlassCardInner,
-                    focusedBorderColor = ElectricBlue,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
+                    focusedContainerColor = AppPalette.GlassCardInner,
+                    unfocusedContainerColor = AppPalette.GlassCardInner,
+                    focusedBorderColor = AppPalette.ElectricBlue,
+                    unfocusedBorderColor = AppPalette.GlassBorder,
+                    focusedTextColor = AppPalette.TextPrimary,
+                    unfocusedTextColor = AppPalette.TextPrimary
                 )
             )
 
@@ -2437,16 +2471,19 @@ private fun LanguagePickerDialog(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .tactilePress(
+                                animationsEnabled = animationsEnabled,
+                                onClick = { onSelect(lang) }
+                            )
                             .clip(RoundedCornerShape(14.dp))
                             .background(
-                                if (isSelected) ElectricBlue.copy(alpha = 0.22f) else GlassCardInner
+                                if (isSelected) AppPalette.ElectricBlue.copy(alpha = 0.22f) else AppPalette.GlassCardInner
                             )
                             .border(
                                 1.dp,
-                                if (isSelected) ElectricBlueLight.copy(alpha = 0.6f) else GlassBorder,
+                                if (isSelected) AppPalette.ElectricBlueLight.copy(alpha = 0.6f) else AppPalette.GlassBorder,
                                 RoundedCornerShape(14.dp)
                             )
-                            .clickable { onSelect(lang) }
                             .padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -2454,7 +2491,7 @@ private fun LanguagePickerDialog(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = lang.nameHe,
-                                color = TextPrimary,
+                                color = AppPalette.TextPrimary,
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -2465,451 +2502,20 @@ private fun LanguagePickerDialog(
                                         append(" • בדיקה בלבד (לא לטיני)")
                                     }
                                 },
-                                color = TextSecondary,
+                                color = AppPalette.TextSecondary,
                                 fontSize = 12.sp
                             )
                         }
                         if (isDownloaded) {
-                            StatusPillBadge(label = "מותקן", color = EmeraldGreen)
+                            PulsingStatusPill(
+                                label = "מותקן",
+                                color = AppPalette.EmeraldGreen,
+                                animationsEnabled = animationsEnabled
+                            )
                         }
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun ObsidianDownloadProgressBar(
-    progress: Float,
-    isDownloading: Boolean,
-    isSegmented: Boolean,
-    segmentProgress: List<Float>,
-    completedParts: Int,
-    totalParts: Int,
-    speedBytesPerSec: Long,
-    labelHe: String,
-    isError: Boolean = false
-) {
-    val clamped by animateFloatAsState(
-        targetValue = progress.coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
-        label = "ObsidianProgress"
-    )
-
-    val infinite = rememberInfiniteTransition(label = "ProgressShimmer")
-    val shimmerOffset by infinite.animateFloat(
-        initialValue = -0.3f,
-        targetValue = 1.3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "BarShimmer"
-    )
-
-    val pct = (clamped * 100f).roundToInt()
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(GlassCardInner)
-            .border(
-                width = 1.dp,
-                color = when {
-                    isError -> AccentRed.copy(alpha = 0.45f)
-                    clamped >= 0.999f && !isDownloading -> EmeraldGreen.copy(alpha = 0.45f)
-                    isDownloading -> ElectricCyan.copy(alpha = 0.45f)
-                    else -> GlassBorder
-                },
-                shape = RoundedCornerShape(14.dp)
-            )
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = labelHe,
-                color = if (isError) Color(0xFFFCA5A5) else TextPrimary,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).padding(end = 8.dp)
-            )
-            Text(
-                text = if (isError) "שגיאה" else "$pct%",
-                color = when {
-                    isError -> AccentRed
-                    clamped >= 0.999f && !isDownloading -> EmeraldGreen
-                    else -> ElectricCyan
-                },
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        Canvas(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(10.dp)
-                .clip(RoundedCornerShape(5.dp))
-        ) {
-            drawRoundRect(
-                color = Color.White.copy(alpha = 0.08f),
-                cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
-            )
-
-            val fillWidth = (size.width * clamped).coerceIn(0f, size.width)
-            if (fillWidth > 1f) {
-                val brush = when {
-                    isError -> Brush.horizontalGradient(listOf(AccentRed, Color(0xFFF87171)))
-                    clamped >= 0.999f && !isDownloading -> Brush.horizontalGradient(
-                        listOf(EmeraldGreen, Color(0xFF34D399))
-                    )
-                    else -> Brush.horizontalGradient(
-                        listOf(GlowPurple, ElectricBlue, ElectricCyan)
-                    )
-                }
-                drawRoundRect(
-                    brush = brush,
-                    size = Size(fillWidth, size.height),
-                    cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
-                )
-
-                if (isDownloading) {
-                    val glossX = shimmerOffset * fillWidth
-                    drawRoundRect(
-                        brush = Brush.horizontalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                Color.White.copy(alpha = 0.45f),
-                                Color.Transparent
-                            ),
-                            startX = (glossX - 60f).coerceAtLeast(0f),
-                            endX = (glossX + 60f).coerceAtMost(fillWidth)
-                        ),
-                        size = Size(fillWidth, size.height),
-                        cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
-                    )
-                }
-            }
-        }
-
-        if (isSegmented && totalParts > 1) {
-            val segments = if (segmentProgress.size == totalParts) {
-                segmentProgress
-            } else {
-                List(totalParts) { idx -> if (idx < completedParts) 1f else 0f }
-            }
-
-            Canvas(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(6.dp)
-            ) {
-                val count = segments.size.coerceAtLeast(1)
-                val gap = 1.5.dp.toPx()
-                val segW = ((size.width - gap * (count - 1)) / count).coerceAtLeast(1f)
-                for (i in 0 until count) {
-                    val p = segments[i].coerceIn(0f, 1f)
-                    val x = i * (segW + gap)
-                    val segColor = when {
-                        p >= 0.99f -> EmeraldGreen
-                        p > 0.05f -> ElectricCyan
-                        else -> Color.White.copy(alpha = 0.10f)
-                    }
-                    drawRoundRect(
-                        color = segColor,
-                        topLeft = Offset(x, 0f),
-                        size = Size(segW, size.height),
-                        cornerRadius = CornerRadius(2f, 2f)
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "חלקים: $completedParts / $totalParts",
-                    color = TextSecondary,
-                    fontSize = 11.sp
-                )
-                Text(
-                    text = if (speedBytesPerSec > 0L) formatSpeed(speedBytesPerSec) else "",
-                    color = ElectricCyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun HeroPowerButton(
-    isServiceActive: Boolean,
-    onClick: () -> Unit
-) {
-    val view = LocalView.current
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-
-    val pressScale by animateFloatAsState(
-        targetValue = if (isPressed) 0.94f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
-        label = "HeroPressScale"
-    )
-
-    val rippleProgress = remember { Animatable(1f) }
-    var clickPulseCount by remember { mutableIntStateOf(0) }
-    LaunchedEffect(clickPulseCount) {
-        if (clickPulseCount > 0) {
-            rippleProgress.snapTo(0f)
-            rippleProgress.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing)
-            )
-        }
-    }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "HeroBreathing")
-    val ring1Progress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2200, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "Ring1"
-    )
-    val ring2Progress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(
-                durationMillis = 2200,
-                delayMillis = 700,
-                easing = FastOutSlowInEasing
-            ),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "Ring2"
-    )
-
-    val coreStartColor by animateColorAsState(
-        targetValue = if (isServiceActive) Color(0xFF10B981) else Color(0xFF60A5FA),
-        animationSpec = tween(320),
-        label = "CoreStart"
-    )
-    val coreEndColor by animateColorAsState(
-        targetValue = if (isServiceActive) Color(0xFF047857) else Color(0xFF2563EB),
-        animationSpec = tween(320),
-        label = "CoreEnd"
-    )
-    val glowColor by animateColorAsState(
-        targetValue = if (isServiceActive) EmeraldGreen else ElectricBlue,
-        animationSpec = tween(320),
-        label = "GlowColor"
-    )
-
-    Box(
-        modifier = Modifier.size(226.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val center = Offset(size.width / 2f, size.height / 2f)
-            val baseRadius = size.minDimension * 0.34f
-
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        glowColor.copy(alpha = if (isServiceActive) 0.42f else 0.34f),
-                        GlowPurple.copy(alpha = if (isServiceActive) 0.08f else 0.14f),
-                        Color.Transparent
-                    ),
-                    center = center,
-                    radius = size.minDimension * 0.50f
-                ),
-                center = center,
-                radius = size.minDimension * 0.50f
-            )
-
-            drawCircle(
-                color = Color.White.copy(alpha = 0.07f),
-                radius = baseRadius * 1.18f,
-                center = center,
-                style = Stroke(width = 1.2.dp.toPx())
-            )
-            drawCircle(
-                color = Color.White.copy(alpha = 0.04f),
-                radius = baseRadius * 1.36f,
-                center = center,
-                style = Stroke(width = 1.dp.toPx())
-            )
-
-            val r1Scale = 1.0f + (ring1Progress * 0.36f)
-            val r1Alpha = (1f - ring1Progress) * 0.40f
-            drawCircle(
-                color = glowColor.copy(alpha = r1Alpha),
-                radius = baseRadius * r1Scale,
-                center = center,
-                style = Stroke(width = 2.dp.toPx())
-            )
-
-            val r2Scale = 1.0f + (ring2Progress * 0.36f)
-            val r2Alpha = (1f - ring2Progress) * 0.28f
-            drawCircle(
-                color = ElectricCyan.copy(alpha = r2Alpha),
-                radius = baseRadius * r2Scale,
-                center = center,
-                style = Stroke(width = 1.5.dp.toPx())
-            )
-
-            if (rippleProgress.value < 0.99f) {
-                val rp = rippleProgress.value
-                drawCircle(
-                    color = Color.White.copy(alpha = (1f - rp) * 0.55f),
-                    radius = baseRadius * (1.0f + rp * 0.48f),
-                    center = center,
-                    style = Stroke(width = (3.5f * (1f - rp) + 1f).dp.toPx())
-                )
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .size(152.dp)
-                .scale(pressScale)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(coreStartColor, coreEndColor),
-                        center = Offset(140f, 110f),
-                        radius = 290f
-                    )
-                )
-                .border(
-                    width = 1.5.dp,
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.50f),
-                            Color.White.copy(alpha = 0.12f)
-                        )
-                    ),
-                    shape = CircleShape
-                )
-                .clickable(
-                    interactionSource = interactionSource,
-                    indication = null
-                ) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                    clickPulseCount++
-                    onClick()
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier.padding(12.dp)
-            ) {
-                PowerTranslateGlyph(
-                    isActive = isServiceActive,
-                    modifier = Modifier.size(54.dp)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = if (isServiceActive) "עצור מתרגם מסך" else "הפעל מתרגם מסך",
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PowerTranslateGlyph(isActive: Boolean, modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        val tint = Color(0xFF0A1628).copy(alpha = 0.85f)
-
-        val powerCenter = Offset(w * 0.5f, h * 0.22f)
-        val powerRadius = w * 0.11f
-        drawArc(
-            color = tint,
-            startAngle = -55f,
-            sweepAngle = 290f,
-            useCenter = false,
-            topLeft = Offset(powerCenter.x - powerRadius, powerCenter.y - powerRadius),
-            size = Size(powerRadius * 2f, powerRadius * 2f),
-            style = stroke
-        )
-        drawLine(
-            color = tint,
-            start = Offset(powerCenter.x, powerCenter.y - powerRadius * 1.25f),
-            end = Offset(powerCenter.x, powerCenter.y + powerRadius * 0.1f),
-            strokeWidth = 2.dp.toPx(),
-            cap = StrokeCap.Round
-        )
-
-        if (isActive) {
-            val sqSize = w * 0.30f
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset((w - sqSize) / 2f, h * 0.52f),
-                size = Size(sqSize, sqSize),
-                cornerRadius = CornerRadius(5.dp.toPx(), 5.dp.toPx())
-            )
-        } else {
-            val tileW = w * 0.34f
-            val tileH = h * 0.34f
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset(w * 0.17f, h * 0.44f),
-                size = Size(tileW, tileH),
-                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-                style = stroke
-            )
-            drawRoundRect(
-                color = tint,
-                topLeft = Offset(w * 0.49f, h * 0.56f),
-                size = Size(tileW, tileH),
-                cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx()),
-                style = stroke
-            )
-            val aPath = Path().apply {
-                moveTo(w * 0.58f, h * 0.82f)
-                lineTo(w * 0.66f, h * 0.64f)
-                lineTo(w * 0.74f, h * 0.82f)
-                moveTo(w * 0.61f, h * 0.76f)
-                lineTo(w * 0.71f, h * 0.76f)
-            }
-            drawPath(aPath, color = tint, style = stroke)
-
-            val alefPath = Path().apply {
-                moveTo(w * 0.25f, h * 0.52f)
-                lineTo(w * 0.42f, h * 0.70f)
-                moveTo(w * 0.41f, h * 0.52f)
-                lineTo(w * 0.36f, h * 0.61f)
-                moveTo(w * 0.26f, h * 0.70f)
-                lineTo(w * 0.31f, h * 0.61f)
-            }
-            drawPath(alefPath, color = tint, style = stroke)
         }
     }
 }
@@ -2923,12 +2529,14 @@ private fun ModelGaugeCard(
     progress: Float,
     statusNote: String,
     fastPackEntryCount: Int,
+    animationsEnabled: Boolean,
+    staggerIndex: Int,
     onDownloadModelClick: () -> Unit
 ) {
-    GlassCard {
+    AnimatedGlassCard(staggerIndex = staggerIndex, animationsEnabled = animationsEnabled) {
         Text(
             text = "מודל לא-מקוון (${sourceLang.code.uppercase()} ← ${targetLang.code.uppercase()})",
-            color = TextPrimary,
+            color = AppPalette.TextPrimary,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -2941,7 +2549,8 @@ private fun ModelGaugeCard(
             CircularModelGauge(
                 isReady = isModelReady,
                 isDownloading = isDownloading,
-                progress = progress
+                progress = progress,
+                animationsEnabled = animationsEnabled
             )
             Column(
                 modifier = Modifier.weight(1f),
@@ -2953,14 +2562,15 @@ private fun ModelGaugeCard(
                         isModelReady -> "עובד מקומית במהירות ללא אינטרנט עבור ${sourceLang.nameHe} ← ${targetLang.nameHe}"
                         else -> "הורדה חד-פעמית (כ-30MB) להפעלת תרגום ללא רשת"
                     },
-                    color = TextSecondary,
+                    color = AppPalette.TextSecondary,
                     fontSize = 13.sp,
                     lineHeight = 19.sp
                 )
                 if (fastPackEntryCount > 0) {
-                    StatusPillBadge(
+                    PulsingStatusPill(
                         label = "חבילה מהירה פעילה ($fastPackEntryCount מונחים)",
-                        color = ElectricCyan
+                        color = AppPalette.ElectricCyan,
+                        animationsEnabled = animationsEnabled
                     )
                 }
             }
@@ -2976,7 +2586,8 @@ private fun ModelGaugeCard(
                 completedParts = 0,
                 totalParts = 1,
                 speedBytesPerSec = 0L,
-                labelHe = statusNote.ifEmpty { "מוריד מודל..." }
+                labelHe = statusNote.ifEmpty { "מוריד מודל..." },
+                animationsEnabled = animationsEnabled
             )
         }
 
@@ -2990,13 +2601,13 @@ private fun ModelGaugeCard(
             shape = RoundedCornerShape(23.dp),
             border = BorderStroke(
                 width = 1.dp,
-                color = if (isModelReady) Color.White.copy(alpha = 0.22f) else ElectricBlue
+                color = if (isModelReady) Color.White.copy(alpha = 0.22f) else AppPalette.ElectricBlue
             ),
             colors = ButtonDefaults.outlinedButtonColors(
                 containerColor = if (isModelReady) {
                     Color.White.copy(alpha = 0.04f)
                 } else {
-                    ElectricBlue.copy(alpha = 0.16f)
+                    AppPalette.ElectricBlue.copy(alpha = 0.16f)
                 }
             )
         ) {
@@ -3006,481 +2617,12 @@ private fun ModelGaugeCard(
                     isModelReady -> "אמת מודל"
                     else -> "הורד מודל ${sourceLang.nameHe} ← ${targetLang.nameHe}"
                 },
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
             )
         }
     }
-}
-
-@Composable
-private fun CircularModelGauge(
-    isReady: Boolean,
-    isDownloading: Boolean,
-    progress: Float
-) {
-    val targetSweep = when {
-        isDownloading -> (progress.coerceIn(0.05f, 0.98f) * 360f)
-        isReady -> 360f
-        else -> 18f
-    }
-    val animatedSweep by animateFloatAsState(
-        targetValue = targetSweep,
-        animationSpec = tween(durationMillis = 450, easing = FastOutSlowInEasing),
-        label = "GaugeSweep"
-    )
-    val infinite = rememberInfiniteTransition(label = "GaugeSpin")
-    val spinAngle by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "SpinAngle"
-    )
-
-    val ringColor = when {
-        isDownloading -> ElectricCyan
-        isReady -> EmeraldGreen
-        else -> AccentAmber
-    }
-
-    Box(
-        modifier = Modifier.size(102.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokePx = 7.dp.toPx()
-            val inset = strokePx + 4.dp.toPx()
-            val arcSize = Size(size.width - inset * 2f, size.height - inset * 2f)
-            val topLeft = Offset(inset, inset)
-
-            if (isReady || isDownloading) {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(ringColor.copy(alpha = 0.24f), Color.Transparent),
-                        center = center,
-                        radius = size.minDimension * 0.52f
-                    ),
-                    radius = size.minDimension * 0.52f,
-                    center = center
-                )
-            }
-
-            drawArc(
-                color = Color.White.copy(alpha = 0.08f),
-                startAngle = 0f,
-                sweepAngle = 360f,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokePx)
-            )
-
-            drawArc(
-                color = ringColor,
-                startAngle = if (isDownloading) spinAngle - 90f else -90f,
-                sweepAngle = animatedSweep,
-                useCenter = false,
-                topLeft = topLeft,
-                size = arcSize,
-                style = Stroke(width = strokePx, cap = StrokeCap.Round)
-            )
-        }
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = when {
-                    isDownloading -> "${(progress * 100f).roundToInt()}%"
-                    isReady -> "100%"
-                    else -> "0%"
-                },
-                color = if (isReady) EmeraldGreen else TextPrimary,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = when {
-                    isDownloading -> "מוריד"
-                    isReady -> "מוכן"
-                    else -> "לא הורד"
-                },
-                color = TextSecondary,
-                fontSize = 12.sp
-            )
-        }
-    }
-}
-
-@Composable
-private fun GlowingDownArrow(active: Boolean) {
-    val glowAlpha by animateFloatAsState(
-        targetValue = if (active) 0.45f else 0.18f,
-        animationSpec = tween(250),
-        label = "ArrowGlow"
-    )
-    Canvas(modifier = Modifier.size(34.dp)) {
-        val cx = size.width / 2f
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(ElectricCyan.copy(alpha = glowAlpha), Color.Transparent),
-                center = Offset(cx, size.height / 2f),
-                radius = size.minDimension * 0.55f
-            ),
-            radius = size.minDimension * 0.55f,
-            center = Offset(cx, size.height / 2f)
-        )
-        val stroke = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-        val arrowPath = Path().apply {
-            moveTo(cx, size.height * 0.18f)
-            lineTo(cx, size.height * 0.78f)
-            moveTo(cx - size.width * 0.22f, size.height * 0.56f)
-            lineTo(cx, size.height * 0.80f)
-            lineTo(cx + size.width * 0.22f, size.height * 0.56f)
-        }
-        drawPath(arrowPath, color = ElectricBlueLight, style = stroke)
-    }
-}
-
-@Composable
-private fun ShimmerTranslationResultBox(
-    isLoading: Boolean,
-    translatedText: String,
-    placeholderText: String,
-    revealKey: Int
-) {
-    val infinite = rememberInfiniteTransition(label = "ResultShimmer")
-    val shimmerPhase by infinite.animateFloat(
-        initialValue = -1f,
-        targetValue = 2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "ShimmerPhase"
-    )
-
-    val borderBrush = if (isLoading || translatedText.isNotEmpty()) {
-        Brush.horizontalGradient(
-            colors = listOf(
-                ElectricCyan.copy(alpha = 0.55f),
-                ElectricBlue.copy(alpha = 0.25f),
-                GlowPurple.copy(alpha = 0.45f)
-            )
-        )
-    } else {
-        Brush.horizontalGradient(colors = listOf(GlassBorder, GlassBorder))
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(GlassCardInner)
-            .border(1.dp, borderBrush, RoundedCornerShape(14.dp))
-            .padding(horizontal = 14.dp, vertical = 14.dp)
-    ) {
-        if (isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(22.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = 0.04f),
-                                ElectricCyan.copy(alpha = 0.30f),
-                                Color.White.copy(alpha = 0.04f)
-                            ),
-                            start = Offset(shimmerPhase * 420f, 0f),
-                            end = Offset((shimmerPhase + 0.8f) * 420f, 80f)
-                        )
-                    )
-            )
-        } else if (translatedText.isEmpty()) {
-            Text(
-                text = placeholderText,
-                color = TextSecondary.copy(alpha = 0.7f),
-                fontSize = 14.sp
-            )
-        } else {
-            AnimatedContent(
-                targetState = revealKey to translatedText,
-                transitionSpec = {
-                    (fadeIn(tween(250, easing = FastOutSlowInEasing)) +
-                        slideInHorizontally(tween(250, easing = FastOutSlowInEasing)) { it / 6 }) togetherWith
-                        fadeOut(tween(120))
-                },
-                label = "TextReveal"
-            ) { (_, text) ->
-                Text(
-                    text = text,
-                    color = TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 22.sp
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FloatingGlassBottomBar(
-    selectedTab: AppTab,
-    onTabSelected: (AppTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val tabs = AppTab.entries
-    val selectedIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
-    val view = LocalView.current
-
-    BoxWithConstraints(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(68.dp)
-            .clip(RoundedCornerShape(32.dp))
-            .background(Color(0xE8131826))
-            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(32.dp))
-            .padding(horizontal = 6.dp, vertical = 6.dp)
-    ) {
-        val tabWidth = maxWidth / tabs.size
-        val spotlightOffset by animateDpAsState(
-            targetValue = tabWidth * selectedIndex,
-            animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
-            label = "SpotlightOffset"
-        )
-
-        Box(
-            modifier = Modifier
-                .offset(x = spotlightOffset)
-                .width(tabWidth)
-                .fillMaxHeight()
-                .padding(horizontal = 4.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            ElectricBlue.copy(alpha = 0.36f),
-                            ElectricBlue.copy(alpha = 0.10f),
-                            Color.Transparent
-                        ),
-                        radius = 150f
-                    )
-                )
-                .border(
-                    width = 1.dp,
-                    color = ElectricBlueLight.copy(alpha = 0.25f),
-                    shape = RoundedCornerShape(24.dp)
-                )
-        )
-
-        Row(modifier = Modifier.fillMaxSize()) {
-            tabs.forEach { tab ->
-                val isSelected = tab == selectedTab
-                val iconJumpY by animateDpAsState(
-                    targetValue = if (isSelected) (-2).dp else 0.dp,
-                    animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
-                    label = "IconJump"
-                )
-                val itemColor by animateColorAsState(
-                    targetValue = if (isSelected) ElectricBlueLight else TextSecondary,
-                    animationSpec = tween(220),
-                    label = "TabTint"
-                )
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(24.dp))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            if (!isSelected) {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                                onTabSelected(tab)
-                            }
-                        },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    NavTabIcon(
-                        tab = tab,
-                        filled = isSelected,
-                        tint = itemColor,
-                        modifier = Modifier
-                            .offset(y = iconJumpY)
-                            .size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.height(3.dp))
-                    Text(
-                        text = tab.label,
-                        color = if (isSelected) TextPrimary else TextSecondary,
-                        fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun NavTabIcon(
-    tab: AppTab,
-    filled: Boolean,
-    tint: Color,
-    modifier: Modifier = Modifier
-) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val stroke = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-
-        when (tab) {
-            AppTab.HOME -> {
-                val house = Path().apply {
-                    moveTo(w * 0.5f, h * 0.14f)
-                    lineTo(w * 0.88f, h * 0.46f)
-                    lineTo(w * 0.80f, h * 0.46f)
-                    lineTo(w * 0.80f, h * 0.86f)
-                    lineTo(w * 0.20f, h * 0.86f)
-                    lineTo(w * 0.20f, h * 0.46f)
-                    lineTo(w * 0.12f, h * 0.46f)
-                    close()
-                }
-                if (filled) {
-                    drawPath(house, color = tint)
-                    drawRoundRect(
-                        color = BgObsidian,
-                        topLeft = Offset(w * 0.42f, h * 0.58f),
-                        size = Size(w * 0.16f, h * 0.28f),
-                        cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
-                    )
-                } else {
-                    drawPath(house, color = tint, style = stroke)
-                }
-            }
-
-            AppTab.MODELS -> {
-                if (filled) {
-                    drawRoundRect(
-                        color = tint.copy(alpha = 0.55f),
-                        topLeft = Offset(w * 0.16f, h * 0.14f),
-                        size = Size(w * 0.48f, h * 0.56f),
-                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
-                    )
-                    drawRoundRect(
-                        color = tint,
-                        topLeft = Offset(w * 0.36f, h * 0.30f),
-                        size = Size(w * 0.48f, h * 0.56f),
-                        cornerRadius = CornerRadius(4.dp.toPx(), 4.dp.toPx())
-                    )
-                } else {
-                    drawRoundRect(
-                        color = tint,
-                        topLeft = Offset(w * 0.16f, h * 0.14f),
-                        size = Size(w * 0.46f, h * 0.54f),
-                        cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
-                        style = stroke
-                    )
-                    drawRoundRect(
-                        color = tint,
-                        topLeft = Offset(w * 0.38f, h * 0.32f),
-                        size = Size(w * 0.46f, h * 0.54f),
-                        cornerRadius = CornerRadius(3.dp.toPx(), 3.dp.toPx()),
-                        style = stroke
-                    )
-                }
-            }
-
-            AppTab.TEST -> {
-                val radius = w * 0.38f
-                val center = Offset(w / 2f, h / 2f)
-                if (filled) {
-                    drawCircle(color = tint, radius = radius, center = center)
-                } else {
-                    drawCircle(color = tint, radius = radius, center = center, style = stroke)
-                }
-                val check = Path().apply {
-                    moveTo(w * 0.34f, h * 0.51f)
-                    lineTo(w * 0.46f, h * 0.63f)
-                    lineTo(w * 0.68f, h * 0.38f)
-                }
-                drawPath(
-                    check,
-                    color = if (filled) BgObsidian else tint,
-                    style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
-            }
-
-            AppTab.SETTINGS -> {
-                val center = Offset(w / 2f, h / 2f)
-                val outerR = w * 0.39f
-                val innerR = w * 0.27f
-                for (i in 0 until 8) {
-                    val angle = Math.toRadians(i * 45.0)
-                    val sx = center.x + (innerR * cos(angle)).toFloat()
-                    val sy = center.y + (innerR * sin(angle)).toFloat()
-                    val ex = center.x + (outerR * cos(angle)).toFloat()
-                    val ey = center.y + (outerR * sin(angle)).toFloat()
-                    drawLine(
-                        color = tint,
-                        start = Offset(sx, sy),
-                        end = Offset(ex, ey),
-                        strokeWidth = 2.4.dp.toPx(),
-                        cap = StrokeCap.Round
-                    )
-                }
-                if (filled) {
-                    drawCircle(color = tint, radius = w * 0.27f, center = center)
-                    drawCircle(color = BgObsidian, radius = w * 0.11f, center = center)
-                } else {
-                    drawCircle(color = tint, radius = w * 0.25f, center = center, style = stroke)
-                    drawCircle(color = tint, radius = w * 0.09f, center = center, style = stroke)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun GlassCard(
-    flashTrigger: Int = 0,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    val flashAlpha = remember { Animatable(0f) }
-    LaunchedEffect(flashTrigger) {
-        if (flashTrigger > 0) {
-            flashAlpha.snapTo(0.85f)
-            flashAlpha.animateTo(
-                targetValue = 0f,
-                animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing)
-            )
-        }
-    }
-
-    val borderColor = Color(
-        red = lerpFloat(1f, ElectricBlueLight.red, flashAlpha.value),
-        green = lerpFloat(1f, ElectricBlueLight.green, flashAlpha.value),
-        blue = lerpFloat(1f, ElectricBlueLight.blue, flashAlpha.value),
-        alpha = lerpFloat(0.08f, 0.72f, flashAlpha.value)
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(GlassCardBg)
-            .border(1.dp, borderColor, RoundedCornerShape(22.dp))
-            .padding(16.dp),
-        content = content
-    )
 }
 
 @Composable
@@ -3512,14 +2654,14 @@ private fun GlassToggleRow(
         ) {
             Text(
                 text = title,
-                color = TextPrimary,
+                color = AppPalette.TextPrimary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(modifier = Modifier.height(3.dp))
             Text(
                 text = subtitle,
-                color = TextSecondary,
+                color = AppPalette.TextSecondary,
                 fontSize = 12.sp,
                 lineHeight = 17.sp
             )
@@ -3532,98 +2674,5 @@ private fun GlassToggleRow(
                 onCheckedChange(it)
             }
         )
-    }
-}
-
-@Composable
-private fun ObsidianToggleSwitch(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    val trackColor by animateColorAsState(
-        targetValue = if (checked) ElectricBlue else Color(0xFF23293A),
-        animationSpec = tween(durationMillis = 200),
-        label = "SwitchTrack"
-    )
-    val thumbColor by animateColorAsState(
-        targetValue = if (checked) Color(0xFF3B1F9E) else Color(0xFF94A3B8),
-        animationSpec = tween(durationMillis = 200),
-        label = "SwitchThumb"
-    )
-    val thumbOffset: Dp by animateDpAsState(
-        targetValue = if (checked) 22.dp else 2.dp,
-        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
-        label = "SwitchOffset"
-    )
-
-    Box(
-        modifier = Modifier
-            .width(50.dp)
-            .height(28.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(trackColor)
-            .border(
-                width = 1.dp,
-                color = if (checked) ElectricBlueLight.copy(alpha = 0.55f) else GlassBorder,
-                shape = RoundedCornerShape(14.dp)
-            )
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) { onCheckedChange(!checked) }
-            .padding(2.dp),
-        contentAlignment = Alignment.CenterStart
-    ) {
-        Box(
-            modifier = Modifier
-                .offset(x = thumbOffset)
-                .size(22.dp)
-                .clip(CircleShape)
-                .background(thumbColor)
-                .border(1.dp, Color.White.copy(alpha = 0.35f), CircleShape)
-        )
-    }
-}
-
-@Composable
-private fun StatusPillBadge(
-    label: String,
-    color: Color,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.14f))
-            .border(1.dp, color.copy(alpha = 0.28f), RoundedCornerShape(50))
-            .padding(horizontal = 11.dp, vertical = 5.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(color)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = label,
-            color = color,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium
-        )
-    }
-}
-
-private fun lerpFloat(start: Float, stop: Float, fraction: Float): Float {
-    return start + (stop - start) * fraction
-}
-
-private fun formatSpeed(bytesPerSec: Long): String {
-    val kb = bytesPerSec / 1024.0
-    return if (kb >= 1024.0) {
-        String.format(Locale.US, "%.1f MB/s", kb / 1024.0)
-    } else {
-        String.format(Locale.US, "%.0f KB/s", kb)
     }
 }
