@@ -11,6 +11,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -44,11 +45,11 @@ class ScreenCaptureHelper(
         private set
 
     @Volatile
-    var scaleX: Float = initialFullWidth.toFloat() / captureWidth.toFloat()
+    var scaleX: Float = initialFullWidth.coerceAtLeast(16).toFloat() / captureWidth.toFloat()
         private set
 
     @Volatile
-    var scaleY: Float = initialFullHeight.toFloat() / captureHeight.toFloat()
+    var scaleY: Float = initialFullHeight.coerceAtLeast(16).toFloat() / captureHeight.toFloat()
         private set
 
     @Volatile
@@ -78,26 +79,31 @@ class ScreenCaptureHelper(
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
+            if (isStopped) return
             isStopped = true
             releaseDisplay()
-            onProjectionStopped()
+            CrashGuard.safeRun("MediaProjection.onStop") {
+                onProjectionStopped()
+            }
         }
     }
 
-    private fun computeWidth(fullW: Int): Int = max(16, (fullW * targetScale).toInt() and 15.inv())
+    private fun computeWidth(fullW: Int): Int =
+        max(16, (fullW.coerceAtLeast(32) * targetScale).toInt() and 15.inv())
 
-    private fun computeHeight(fullH: Int): Int = max(16, (fullH * targetScale).toInt() and 1.inv())
+    private fun computeHeight(fullH: Int): Int =
+        max(16, (fullH.coerceAtLeast(32) * targetScale).toInt() and 1.inv())
 
     fun getFrameVersion(): Long = frameVersion
 
+    fun isActive(): Boolean = !isStopped && mediaProjection != null
+
     fun start(): Boolean {
-        val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = try {
+        val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            ?: return false
+
+        val projection = CrashGuard.safeCall("ScreenCapture.getMediaProjection", null) {
             manager.getMediaProjection(resultCode, dataIntent)
-        } catch (_: SecurityException) {
-            null
-        } catch (_: Exception) {
-            null
         } ?: return false
 
         val thread = HandlerThread("ScreenCaptureThread").apply { start() }
@@ -110,9 +116,8 @@ class ScreenCaptureHelper(
             mediaProjection = projection
         }
 
-        projection.registerCallback(projectionCallback, handler)
-
         return try {
+            projection.registerCallback(projectionCallback, handler)
             synchronized(captureLock) {
                 val reader = createReaderLocked(captureWidth, captureHeight, handler)
                 imageReader = reader
@@ -127,18 +132,16 @@ class ScreenCaptureHelper(
                     handler
                 )
             }
-            true
-        } catch (_: SecurityException) {
-            stop()
-            false
-        } catch (_: Exception) {
+            virtualDisplay != null
+        } catch (t: Throwable) {
+            CrashGuard.recordError("ScreenCapture.start", t)
             stop()
             false
         }
     }
 
     fun resize(newFullWidth: Int, newFullHeight: Int, newDensityDpi: Int) {
-        if (isStopped || newFullWidth <= 0 || newFullHeight <= 0) return
+        if (isStopped || newFullWidth <= 16 || newFullHeight <= 16) return
 
         val handler = captureHandler ?: return
         val newW = computeWidth(newFullWidth)
@@ -156,20 +159,24 @@ class ScreenCaptureHelper(
             captureDpi = newDpi
 
             val oldReader = imageReader
-            val newReader = createReaderLocked(newW, newH, handler)
+            val newReader = CrashGuard.safeCall("ScreenCapture.resizeReader", null) {
+                createReaderLocked(newW, newH, handler)
+            } ?: return
             imageReader = newReader
 
-            latestBitmap?.recycle()
+            latestBitmap?.let { if (!it.isRecycled) it.recycle() }
             latestBitmap = null
             tightBytes = null
             tightBuffer = null
             captureRequested = true
 
-            runCatching {
+            CrashGuard.safeRun("ScreenCapture.resizeDisplay") {
                 virtualDisplay?.resize(newW, newH, newDpi)
                 virtualDisplay?.surface = newReader.surface
             }
-            runCatching { oldReader?.close() }
+            CrashGuard.safeRun("ScreenCapture.closeOldReader") {
+                oldReader?.close()
+            }
         }
     }
 
@@ -178,22 +185,28 @@ class ScreenCaptureHelper(
         reader.setOnImageAvailableListener({ ir ->
             synchronized(captureLock) {
                 if (isStopped || ir !== imageReader) return@setOnImageAvailableListener
-                val image = runCatching { ir.acquireLatestImage() }.getOrNull()
-                    ?: return@setOnImageAvailableListener
+                val image = try {
+                    ir.acquireLatestImage()
+                } catch (_: Throwable) {
+                    null
+                } ?: return@setOnImageAvailableListener
+
                 try {
                     val now = System.currentTimeMillis()
                     val shouldDecode = captureRequested || latestBitmap == null || (now - lastFrameTimestamp >= 180L)
                     if (!shouldDecode) return@setOnImageAvailableListener
 
-                    val plane = image.planes[0]
-                    val buffer = plane.buffer
+                    val planes = image.planes
+                    if (planes.isEmpty()) return@setOnImageAvailableListener
+                    val plane = planes[0]
+                    val buffer = plane.buffer ?: return@setOnImageAvailableListener
                     val pixelStride = plane.pixelStride
                     val rowStride = plane.rowStride
                     if (pixelStride != 4 || rowStride < w * pixelStride) return@setOnImageAvailableListener
 
                     var dest = latestBitmap
                     if (dest == null || dest.isRecycled || dest.width != w || dest.height != h) {
-                        dest?.recycle()
+                        dest?.let { if (!it.isRecycled) it.recycle() }
                         dest = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                         latestBitmap = dest
                     }
@@ -216,7 +229,9 @@ class ScreenCaptureHelper(
                         val limit = buffer.limit()
                         for (row in 0 until h) {
                             val srcOffset = row * rowStride
-                            if (srcOffset + rowBytes > limit) return@setOnImageAvailableListener
+                            if (srcOffset < 0 || srcOffset + rowBytes > limit) {
+                                return@setOnImageAvailableListener
+                            }
                             buffer.position(srcOffset)
                             buffer.get(bytes, row * rowBytes, rowBytes)
                         }
@@ -227,10 +242,13 @@ class ScreenCaptureHelper(
                     lastFrameTimestamp = now
                     frameVersion++
                     captureRequested = false
-                } catch (_: Exception) {
-                    // Ignore transient surface transition errors
+                } catch (t: Throwable) {
+                    CrashGuard.recordError("ScreenCapture.onImageAvailable", t)
                 } finally {
-                    image.close()
+                    try {
+                        image.close()
+                    } catch (_: Throwable) {
+                    }
                 }
             }
         }, handler)
@@ -245,30 +263,27 @@ class ScreenCaptureHelper(
             captureRequested = true
             repeat(6) {
                 if (isStopped) return@withContext null
-                synchronized(captureLock) {
-                    val bmp = latestBitmap
-                    if (bmp != null && !bmp.isRecycled && lastFrameTimestamp >= startRequestTime) {
-                        return@withContext CapturedFrame(
-                            bitmap = bmp.copy(Bitmap.Config.ARGB_8888, false),
-                            scaleX = scaleX,
-                            scaleY = scaleY
-                        )
-                    }
-                }
+                val fresh = tryCopyLatestLocked(requireTimestampAtLeast = startRequestTime)
+                if (fresh != null) return@withContext fresh
                 delay(35L)
             }
         }
 
-        synchronized(captureLock) {
-            if (isStopped) return@withContext null
-            val bmp = latestBitmap
-            if (bmp != null && !bmp.isRecycled) {
-                CapturedFrame(
-                    bitmap = bmp.copy(Bitmap.Config.ARGB_8888, false),
-                    scaleX = scaleX,
-                    scaleY = scaleY
-                )
-            } else {
+        if (isStopped) null else tryCopyLatestLocked(requireTimestampAtLeast = 0L)
+    }
+
+    private fun tryCopyLatestLocked(requireTimestampAtLeast: Long): CapturedFrame? {
+        return synchronized(captureLock) {
+            if (isStopped) return@synchronized null
+            val bmp = latestBitmap ?: return@synchronized null
+            if (bmp.isRecycled || lastFrameTimestamp < requireTimestampAtLeast) return@synchronized null
+            try {
+                val copy = bmp.copy(Bitmap.Config.ARGB_8888, false) ?: return@synchronized null
+                CapturedFrame(bitmap = copy, scaleX = scaleX, scaleY = scaleY)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                CrashGuard.recordError("ScreenCapture.copyFrame", t)
                 null
             }
         }
@@ -276,13 +291,13 @@ class ScreenCaptureHelper(
 
     private fun releaseDisplay() {
         synchronized(captureLock) {
-            runCatching { virtualDisplay?.release() }
+            CrashGuard.safeRun("ScreenCapture.releaseVD") { virtualDisplay?.release() }
             virtualDisplay = null
-            runCatching { imageReader?.close() }
+            CrashGuard.safeRun("ScreenCapture.closeReader") { imageReader?.close() }
             imageReader = null
             tightBytes = null
             tightBuffer = null
-            latestBitmap?.recycle()
+            latestBitmap?.let { if (!it.isRecycled) it.recycle() }
             latestBitmap = null
         }
     }
@@ -291,10 +306,16 @@ class ScreenCaptureHelper(
         isStopped = true
         val proj = mediaProjection
         mediaProjection = null
-        runCatching { proj?.unregisterCallback(projectionCallback) }
-        runCatching { proj?.stop() }
+        CrashGuard.safeRun("ScreenCapture.unregisterCallback") {
+            proj?.unregisterCallback(projectionCallback)
+        }
+        CrashGuard.safeRun("ScreenCapture.stopProjection") {
+            proj?.stop()
+        }
         releaseDisplay()
-        captureThread?.quitSafely()
+        CrashGuard.safeRun("ScreenCapture.quitThread") {
+            captureThread?.quitSafely()
+        }
         captureThread = null
         captureHandler = null
     }
