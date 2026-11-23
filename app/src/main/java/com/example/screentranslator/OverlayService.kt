@@ -22,7 +22,6 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
-import android.hardware.input.InputManager
 import android.os.Build
 import android.os.IBinder
 import android.text.Layout
@@ -75,13 +74,15 @@ class OverlayService : Service() {
 
     private var captureHelper: ScreenCaptureHelper? = null
     private val recognizerHelper = TextRecognizerHelper()
-    private val translationEngine = OfflineEnHeTranslator()
+    private lateinit var translationEngine: ScreenTranslationEngine
     private val diffTracker = ScreenDiffTracker()
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var watcherJob: Job? = null
     private val overlayGeneration = AtomicLong(0L)
 
+    private var sourceLang: LanguageOption = LanguageCatalog.defaultSource
+    private var targetLang: LanguageOption = LanguageCatalog.defaultTarget
     private var isAutoMode = false
     private var offlineOnlyMode = true
     private var skipBrandNames = true
@@ -100,6 +101,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         _serviceRunningState.value = true
+        translationEngine = ScreenTranslationEngine(applicationContext)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         statusBarHeight = loadSystemBarHeight("status_bar_height", dp(30))
         navBarHeight = loadSystemBarHeight("navigation_bar_height", dp(36))
@@ -124,6 +126,20 @@ class OverlayService : Service() {
         skipBrandNames = intent?.getBooleanExtra(EXTRA_SKIP_BRANDS, true) ?: true
         enableScanWave = intent?.getBooleanExtra(EXTRA_SCAN_WAVE, true) ?: true
 
+        sourceLang = LanguageCatalog.findByCode(
+            intent?.getStringExtra(EXTRA_SOURCE_LANG) ?: LanguageCatalog.defaultSource.code
+        )
+        targetLang = LanguageCatalog.findByCode(
+            intent?.getStringExtra(EXTRA_TARGET_LANG) ?: LanguageCatalog.defaultTarget.code
+        )
+
+        val validation = EdgeCasePolicy.validateLanguagePair(sourceLang, targetLang)
+        if (!validation.isValid) {
+            Toast.makeText(this, validation.errorHe ?: "זוג שפות לא תקין", Toast.LENGTH_LONG).show()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         if (resultCode == 0 || dataIntent == null) {
             stopSelf()
             return START_NOT_STICKY
@@ -142,6 +158,9 @@ class OverlayService : Service() {
 
         if (!::overlayCanvasView.isInitialized) {
             setupOverlayViews()
+        } else {
+            clearOverlayBlocks()
+            diffTracker.reset()
         }
 
         captureHelper?.stop()
@@ -169,18 +188,22 @@ class OverlayService : Service() {
         startScreenWatcher()
 
         serviceScope.launch {
+            if (validation.warningHe != null) {
+                Toast.makeText(this@OverlayService, validation.warningHe, Toast.LENGTH_LONG).show()
+            }
+
             if (offlineOnlyMode) {
-                val ready = translationEngine.prepareModel()
+                val ready = translationEngine.prepareModel(sourceLang, targetLang)
                 if (ready.isFailure) {
                     Toast.makeText(
                         this@OverlayService,
-                        "המודל הלא-מקוון לא מותקן — הורד אותו במסך הראשי",
+                        "המודל ${sourceLang.nameHe} ← ${targetLang.nameHe} לא מותקן — הורד אותו בלשונית מודלים",
                         Toast.LENGTH_LONG
                     ).show()
                 }
             } else {
                 launch(Dispatchers.IO) {
-                    translationEngine.isModelDownloaded()
+                    translationEngine.isPairModelDownloaded(sourceLang, targetLang)
                 }
             }
 
@@ -189,7 +212,7 @@ class OverlayService : Service() {
             } else {
                 Toast.makeText(
                     this@OverlayService,
-                    "לשונית התרגום פעילה בצד המסך",
+                    "לשונית התרגום פעילה (${sourceLang.nameHe} ← ${targetLang.nameHe})",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -231,15 +254,6 @@ class OverlayService : Service() {
         }
     }
 
-    private fun getSafeOverlayAlpha(): Float {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val inputManager = getSystemService(Context.INPUT_SERVICE) as InputManager
-            (inputManager.maximumObscuringOpacityForTouch - 0.02f).coerceIn(0.65f, 0.78f)
-        } else {
-            0.95f
-        }
-    }
-
     private fun loadSystemBarHeight(resourceName: String, fallbackPx: Int): Int {
         val id = resources.getIdentifier(resourceName, "dimen", "android")
         return if (id > 0) resources.getDimensionPixelSize(id) else fallbackPx
@@ -267,7 +281,7 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
-            alpha = getSafeOverlayAlpha()
+            alpha = EdgeCasePolicy.resolveSafeOverlayAlpha(this@OverlayService)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -533,11 +547,13 @@ class OverlayService : Service() {
         }
         val targetW = overlayCanvasView.width.takeIf { it > 0 } ?: screenWidth
         val targetH = overlayCanvasView.height.takeIf { it > 0 } ?: screenHeight
+        val isTargetRtl = targetLang.isRtl
         val layouts = withContext(Dispatchers.Default) {
             OverlayLayoutEngine.compute(
                 blocks = blocks,
                 canvasWidth = targetW,
-                canvasHeight = targetH
+                canvasHeight = targetH,
+                isTargetRtl = isTargetRtl
             )
         }
         if (overlayGeneration.get() != expectedGeneration) return
@@ -681,19 +697,25 @@ class OverlayService : Service() {
 
     private suspend fun translateBlocksFiltered(blocks: List<RecognizedBlock>): List<RecognizedBlock> {
         val eligible = blocks.filterNot {
-            translationEngine.shouldSkipText(it.text, skipBrands = skipBrandNames)
+            translationEngine.shouldSkipText(
+                rawText = it.text,
+                source = sourceLang,
+                target = targetLang,
+                skipBrands = skipBrandNames
+            )
         }
         if (eligible.isEmpty()) return emptyList()
 
         val translatedMap = translationEngine.translateBatch(
             texts = eligible.map { it.text },
+            source = sourceLang,
+            target = targetLang,
             offlineOnly = offlineOnlyMode
         )
 
         return eligible.mapNotNull { block ->
             val translated = translatedMap[block.text]?.trim().orEmpty()
-            val hasHebrew = translated.any { it in '\u0590'..'\u05FF' }
-            if (hasHebrew && !translated.equals(block.text, ignoreCase = true)) {
+            if (translationEngine.isValidResult(block.text, translated, targetLang)) {
                 block.copy(translatedText = translated)
             } else {
                 null
@@ -709,13 +731,14 @@ class OverlayService : Service() {
         updateIndicatorColor("#F59E0B")
 
         try {
-            val padX = dp(24)
-            val padY = dp(16)
-            val expandedScreenRect = Rect(
-                (rawDirtyRect.left - padX).coerceIn(0, screenWidth - 1),
-                (rawDirtyRect.top - padY).coerceIn(statusBarHeight, screenHeight - 1),
-                (rawDirtyRect.right + padX).coerceIn(1, screenWidth),
-                (rawDirtyRect.bottom + padY).coerceIn(1, screenHeight - navBarHeight)
+            val expandedScreenRect = EdgeCasePolicy.clampCropRect(
+                rawRect = rawDirtyRect,
+                padX = dp(24),
+                padY = dp(16),
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                topInset = statusBarHeight,
+                bottomInset = navBarHeight
             )
 
             val existingBlocks = overlayCanvasView.getBlocks()
@@ -751,6 +774,7 @@ class OverlayService : Service() {
                 try {
                     val detected = recognizerHelper.recognize(
                         bitmap = cropped,
+                        targetLang = targetLang,
                         bitmapOffsetX = bmpLeft,
                         bitmapOffsetY = bmpTop,
                         scaleX = activeCapture.scaleX,
@@ -808,6 +832,7 @@ class OverlayService : Service() {
             try {
                 val blocks = recognizerHelper.recognize(
                     bitmap = captured.bitmap,
+                    targetLang = targetLang,
                     scaleX = captured.scaleX,
                     scaleY = captured.scaleY,
                     minTopY = statusBarHeight,
@@ -830,7 +855,11 @@ class OverlayService : Service() {
                     }
                     lastCheckedFrameVersion = helper.getFrameVersion()
                     if (showFeedback) {
-                        Toast.makeText(this, "לא נמצא טקסט באנגלית לתרגום", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this,
+                            "לא נמצא טקסט מתאים ב${sourceLang.nameHe} לתרגום",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
                 } else {
                     refreshBaselineAfterOverlay(if (enableScanWave) 640L else 120L)
@@ -870,10 +899,10 @@ class OverlayService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val modeLabel = if (offlineOnlyMode) "מצב לא-מקוון" else "מצב היברידי"
+        val modeLabel = if (offlineOnlyMode) "לא-מקוון" else "היברידי"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("תרגום מסך ($modeLabel) פעיל")
+            .setContentText("${sourceLang.nameHe} ← ${targetLang.nameHe} ($modeLabel)")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .build()
@@ -884,7 +913,9 @@ class OverlayService : Service() {
         watcherJob?.cancel()
         captureHelper?.stop()
         recognizerHelper.close()
-        translationEngine.close()
+        if (::translationEngine.isInitialized) {
+            translationEngine.close()
+        }
         serviceScope.cancel()
         if (::overlayCanvasView.isInitialized) {
             overlayCanvasView.stopAnimations()
@@ -1052,7 +1083,8 @@ class OverlayService : Service() {
         fun compute(
             blocks: List<RecognizedBlock>,
             canvasWidth: Int,
-            canvasHeight: Int
+            canvasHeight: Int,
+            isTargetRtl: Boolean
         ): List<RenderedBlockLayout> {
             if (blocks.isEmpty() || canvasWidth <= 0 || canvasHeight <= 0) return emptyList()
 
@@ -1122,7 +1154,7 @@ class OverlayService : Service() {
                     val layoutWidth = max(origW.toFloat(), min(measuredWidth, maxAllowedWidth))
                         .toInt()
                         .coerceAtLeast(26)
-                    layout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_CENTER)
+                    layout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_CENTER, isTargetRtl)
 
                     val boxW = max(origW + padX * 2f, layoutWidth + padX * 2f)
                     val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
@@ -1166,11 +1198,11 @@ class OverlayService : Service() {
                     }
                     val layoutWidth = (right - left - padX * 2f).toInt().coerceAtLeast(44)
 
-                    var fittedLayout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_NORMAL)
+                    var fittedLayout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_NORMAL, isTargetRtl)
                     while (fittedLayout.height > origH + padY && fontSize > 15f) {
                         fontSize -= 1.2f
                         paint.textSize = fontSize
-                        fittedLayout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_NORMAL)
+                        fittedLayout = buildStaticLayout(text, paint, layoutWidth, Layout.Alignment.ALIGN_NORMAL, isTargetRtl)
                     }
                     layout = fittedLayout
 
@@ -1212,11 +1244,17 @@ class OverlayService : Service() {
             text: String,
             paint: TextPaint,
             widthPx: Int,
-            alignment: Layout.Alignment
+            alignment: Layout.Alignment,
+            isTargetRtl: Boolean
         ): StaticLayout {
+            val direction = if (isTargetRtl) {
+                TextDirectionHeuristics.RTL
+            } else {
+                TextDirectionHeuristics.LTR
+            }
             return StaticLayout.Builder.obtain(text, 0, text.length, paint, widthPx.coerceAtLeast(1))
                 .setAlignment(alignment)
-                .setTextDirection(TextDirectionHeuristics.RTL)
+                .setTextDirection(direction)
                 .setIncludePad(false)
                 .build()
         }
@@ -1384,5 +1422,7 @@ class OverlayService : Service() {
         const val EXTRA_OFFLINE_ONLY = "extra_offline_only"
         const val EXTRA_SKIP_BRANDS = "extra_skip_brands"
         const val EXTRA_SCAN_WAVE = "extra_scan_wave"
+        const val EXTRA_SOURCE_LANG = "extra_source_lang"
+        const val EXTRA_TARGET_LANG = "extra_target_lang"
     }
 }
