@@ -146,9 +146,6 @@ internal object AppMotion {
     }
 }
 
-/**
- * כניסה מדורגת חלקה לכרטיסיות ורכיבים במעבר בין מסכים.
- */
 internal fun Modifier.staggeredEntrance(
     index: Int,
     enabled: Boolean = true
@@ -163,7 +160,7 @@ internal fun Modifier.staggeredEntrance(
         )
     }
     this.graphicsLayer {
-        val v = progress.value
+        val v = progress.value.coerceIn(0f, 1f)
         alpha = v
         translationY = (1f - v) * 26f
         val s = 0.975f + (0.025f * v)
@@ -172,9 +169,6 @@ internal fun Modifier.staggeredEntrance(
     }
 }
 
-/**
- * תגובת לחיצה קפיצית + רטט מיקרו לכל כפתור או אריח.
- */
 internal fun Modifier.tactilePress(
     enabled: Boolean = true,
     pressedScale: Float = 0.95f,
@@ -196,14 +190,13 @@ internal fun Modifier.tactilePress(
             interactionSource = interactionSource,
             indication = null
         ) {
-            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            CrashGuard.safeRun("TactileHaptic") {
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
             onClick()
         }
 }
 
-/**
- * רקע אובסידיאן חי עם ערפיליות Aurora וחלקיקי אור מרחפים.
- */
 @Composable
 internal fun ObsidianAmbientBackdrop(
     isServiceActive: Boolean,
@@ -240,9 +233,9 @@ internal fun ObsidianAmbientBackdrop(
         List(16) { i ->
             val seed = (i + 1) * 37
             Triple(
-                ((seed * 29) % 100) / 100f,   // base X
-                ((seed * 53) % 100) / 100f,   // base Y offset
-                1.4f + (i % 3) * 0.9f         // radius dp
+                ((seed * 29) % 100) / 100f,
+                ((seed * 53) % 100) / 100f,
+                1.4f + (i % 3) * 0.9f
             )
         }
     }
@@ -250,10 +243,12 @@ internal fun ObsidianAmbientBackdrop(
     Canvas(modifier = modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
-        val angle = (phase * 2.0 * PI)
+        if (w <= 2f || h <= 2f) return@Canvas
 
+        val angle = phase * 2.0 * PI
         val orb1X = w * (0.50f + 0.14f * cos(angle).toFloat())
         val orb1Y = h * (0.18f + 0.05f * sin(angle).toFloat())
+        val orb1R = (w * 0.82f).coerceAtLeast(10f)
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
@@ -262,14 +257,15 @@ internal fun ObsidianAmbientBackdrop(
                     Color.Transparent
                 ),
                 center = Offset(orb1X, orb1Y),
-                radius = w * 0.82f
+                radius = orb1R
             ),
             center = Offset(orb1X, orb1Y),
-            radius = w * 0.82f
+            radius = orb1R
         )
 
         val orb2X = w * (0.20f + 0.18f * sin(angle * 0.8).toFloat())
         val orb2Y = h * (0.72f + 0.06f * cos(angle * 0.8).toFloat())
+        val orb2R = (w * 0.65f).coerceAtLeast(10f)
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
@@ -277,10 +273,10 @@ internal fun ObsidianAmbientBackdrop(
                     Color.Transparent
                 ),
                 center = Offset(orb2X, orb2Y),
-                radius = w * 0.65f
+                radius = orb2R
             ),
             center = Offset(orb2X, orb2Y),
-            radius = w * 0.65f
+            radius = orb2R
         )
 
         if (animationsEnabled) {
@@ -301,9 +297,6 @@ internal fun ObsidianAmbientBackdrop(
     }
 }
 
-/**
- * כרטיסיית זכוכית עם הבהוב מסגרת עדין בעת שינוי הגדרה וכניסה מדורגת.
- */
 @Composable
 internal fun AnimatedGlassCard(
     modifier: Modifier = Modifier,
@@ -323,11 +316,12 @@ internal fun AnimatedGlassCard(
         }
     }
 
+    val safeFlash = flashAlpha.value.coerceIn(0f, 1f)
     val borderColor = Color(
-        red = lerpFloat(1f, AppPalette.ElectricBlueLight.red, flashAlpha.value),
-        green = lerpFloat(1f, AppPalette.ElectricBlueLight.green, flashAlpha.value),
-        blue = lerpFloat(1f, AppPalette.ElectricBlueLight.blue, flashAlpha.value),
-        alpha = lerpFloat(0.08f, 0.78f, flashAlpha.value)
+        red = lerpFloat(1f, AppPalette.ElectricBlueLight.red, safeFlash).coerceIn(0f, 1f),
+        green = lerpFloat(1f, AppPalette.ElectricBlueLight.green, safeFlash).coerceIn(0f, 1f),
+        blue = lerpFloat(1f, AppPalette.ElectricBlueLight.blue, safeFlash).coerceIn(0f, 1f),
+        alpha = lerpFloat(0.08f, 0.78f, safeFlash).coerceIn(0f, 1f)
     )
 
     Column(
@@ -342,9 +336,6 @@ internal fun AnimatedGlassCard(
     )
 }
 
-/**
- * כפתור החלפת שפות עם סיבוב קפיצי של 180 מעלות והבזק זוהר.
- */
 @Composable
 internal fun AnimatedSwapButton(
     animationsEnabled: Boolean,
@@ -369,23 +360,24 @@ internal fun AnimatedSwapButton(
         }
     }
 
+    val safePulse = glowPulse.value.coerceIn(0f, 1f)
     Box(
         modifier = Modifier
             .size(42.dp)
             .clip(CircleShape)
-            .background(
-                AppPalette.ElectricBlue.copy(alpha = 0.16f + glowPulse.value * 0.28f)
-            )
+            .background(AppPalette.ElectricBlue.copy(alpha = 0.16f + safePulse * 0.28f))
             .border(
                 width = 1.dp,
-                color = AppPalette.ElectricCyan.copy(alpha = 0.35f + glowPulse.value * 0.55f),
+                color = AppPalette.ElectricCyan.copy(alpha = 0.35f + safePulse * 0.55f),
                 shape = CircleShape
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                CrashGuard.safeRun("SwapHaptic") {
+                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                }
                 targetRotation += 180f
                 pulseTick++
                 onClick()
@@ -402,9 +394,6 @@ internal fun AnimatedSwapButton(
     }
 }
 
-/**
- * תגית סטטוס עם נקודת פעימה חיה לסטטוסים פעילים.
- */
 @Composable
 internal fun PulsingStatusPill(
     label: String,
@@ -423,7 +412,7 @@ internal fun PulsingStatusPill(
                 repeatMode = RepeatMode.Restart
             ),
             label = "DotHalo"
-        ).value
+        ).value.coerceIn(0f, 1f)
     } else {
         0f
     }
@@ -442,6 +431,7 @@ internal fun PulsingStatusPill(
         ) {
             if (pulsing && animationsEnabled) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
+                    if (size.minDimension <= 1f) return@Canvas
                     val r = (3.5f + pulseProgress * 4.5f).dp.toPx()
                     drawCircle(
                         color = color.copy(alpha = (1f - pulseProgress) * 0.55f),
@@ -466,9 +456,6 @@ internal fun PulsingStatusPill(
     }
 }
 
-/**
- * סורק לייזר אנכי כחול-טורקיז המוצג מעל תמונה שהועלתה בזמן זיהוי ותרגום.
- */
 @Composable
 internal fun ImageScanLaserOverlay(
     statusText: String,
@@ -478,14 +465,14 @@ internal fun ImageScanLaserOverlay(
     val scanY = if (animationsEnabled) {
         val infinite = rememberInfiniteTransition(label = "ImageLaser")
         infinite.animateFloat(
-            initialValue = 0.06f,
-            targetValue = 0.94f,
+            initialValue = 0.08f,
+            targetValue = 0.92f,
             animationSpec = infiniteRepeatable(
                 animation = tween(durationMillis = 1250, easing = FastOutSlowInEasing),
                 repeatMode = RepeatMode.Reverse
             ),
             label = "LaserY"
-        ).value
+        ).value.coerceIn(0.05f, 0.95f)
     } else {
         0.5f
     }
@@ -499,10 +486,13 @@ internal fun ImageScanLaserOverlay(
         Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
-            val beamY = h * scanY
-            val trailH = h * 0.22f
+            if (w <= 4f || h <= 4f) return@Canvas
 
-            // Glowing sweep band
+            val beamY = h * scanY
+            val trailH = (h * 0.22f).coerceAtLeast(8f)
+            val topY = (beamY - trailH).coerceIn(0f, h - 2f)
+            val botY = (beamY + trailH).coerceIn(topY + 2f, h)
+
             drawRect(
                 brush = Brush.verticalGradient(
                     colors = listOf(
@@ -512,14 +502,13 @@ internal fun ImageScanLaserOverlay(
                         AppPalette.ElectricBlue.copy(alpha = 0.22f),
                         Color.Transparent
                     ),
-                    startY = (beamY - trailH).coerceAtLeast(0f),
-                    endY = (beamY + trailH).coerceAtMost(h)
+                    startY = topY,
+                    endY = botY
                 ),
-                topLeft = Offset(0f, (beamY - trailH).coerceAtLeast(0f)),
-                size = Size(w, trailH * 2f)
+                topLeft = Offset(0f, topY),
+                size = Size(w, (botY - topY).coerceAtLeast(1f))
             )
 
-            // Crisp bright laser core line
             drawLine(
                 brush = Brush.horizontalGradient(
                     colors = listOf(
@@ -536,19 +525,14 @@ internal fun ImageScanLaserOverlay(
                 cap = StrokeCap.Round
             )
 
-            // Corner HUD brackets
-            val pad = 16.dp.toPx()
-            val arm = 22.dp.toPx()
+            val pad = 16.dp.toPx().coerceAtMost(minOf(w, h) * 0.25f)
+            val arm = 22.dp.toPx().coerceAtMost(minOf(w, h) * 0.22f)
             val bracketStroke = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round)
             val bracketColor = AppPalette.ElectricCyan.copy(alpha = 0.85f)
             val corners = Path().apply {
-                // Top-left
                 moveTo(pad, pad + arm); lineTo(pad, pad); lineTo(pad + arm, pad)
-                // Top-right
                 moveTo(w - pad - arm, pad); lineTo(w - pad, pad); lineTo(w - pad, pad + arm)
-                // Bottom-left
                 moveTo(pad, h - pad - arm); lineTo(pad, h - pad); lineTo(pad + arm, h - pad)
-                // Bottom-right
                 moveTo(w - pad - arm, h - pad); lineTo(w - pad, h - pad); lineTo(w - pad, h - pad - arm)
             }
             drawPath(corners, color = bracketColor, style = bracketStroke)
@@ -571,9 +555,6 @@ internal fun ImageScanLaserOverlay(
     }
 }
 
-/**
- * כפתור ההפעלה המרכזי עם טבעות נשימה (2200ms), כיווץ לחיצה (0.94) ואדוות אור.
- */
 @Composable
 internal fun HeroPowerButton(
     isServiceActive: Boolean,
@@ -614,7 +595,7 @@ internal fun HeroPowerButton(
                 repeatMode = RepeatMode.Restart
             ),
             label = "Ring1"
-        ).value
+        ).value.coerceIn(0f, 1f)
         ring2Progress = infiniteTransition.animateFloat(
             initialValue = 0f,
             targetValue = 1f,
@@ -627,7 +608,7 @@ internal fun HeroPowerButton(
                 repeatMode = RepeatMode.Restart
             ),
             label = "Ring2"
-        ).value
+        ).value.coerceIn(0f, 1f)
     } else {
         ring1Progress = 0.25f
         ring2Progress = 0.65f
@@ -654,8 +635,10 @@ internal fun HeroPowerButton(
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
+            if (size.minDimension <= 4f) return@Canvas
             val center = Offset(size.width / 2f, size.height / 2f)
-            val baseRadius = size.minDimension * 0.34f
+            val baseRadius = (size.minDimension * 0.34f).coerceAtLeast(4f)
+            val haloRadius = (size.minDimension * 0.50f).coerceAtLeast(8f)
 
             drawCircle(
                 brush = Brush.radialGradient(
@@ -665,10 +648,10 @@ internal fun HeroPowerButton(
                         Color.Transparent
                     ),
                     center = center,
-                    radius = size.minDimension * 0.50f
+                    radius = haloRadius
                 ),
                 center = center,
-                radius = size.minDimension * 0.50f
+                radius = haloRadius
             )
 
             drawCircle(
@@ -702,8 +685,8 @@ internal fun HeroPowerButton(
                 style = Stroke(width = 1.5.dp.toPx())
             )
 
-            if (rippleProgress.value < 0.99f) {
-                val rp = rippleProgress.value
+            val rp = rippleProgress.value.coerceIn(0f, 1f)
+            if (rp < 0.99f) {
                 drawCircle(
                     color = Color.White.copy(alpha = (1f - rp) * 0.55f),
                     radius = baseRadius * (1.0f + rp * 0.48f),
@@ -739,7 +722,9 @@ internal fun HeroPowerButton(
                     interactionSource = interactionSource,
                     indication = null
                 ) {
-                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    CrashGuard.safeRun("HeroHaptic") {
+                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    }
                     clickPulseCount++
                     onClick()
                 },
@@ -772,6 +757,7 @@ private fun PowerTranslateGlyph(isActive: Boolean, modifier: Modifier = Modifier
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
+        if (w <= 4f || h <= 4f) return@Canvas
         val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
         val tint = Color(0xFF0A1628).copy(alpha = 0.85f)
 
@@ -841,9 +827,6 @@ private fun PowerTranslateGlyph(isActive: Boolean, modifier: Modifier = Modifier
     }
 }
 
-/**
- * פס התקדמות מותאם לסגנון Dark Obsidian & Glass עם תצוגת 60 חלקים מקבילים.
- */
 @Composable
 internal fun ObsidianDownloadProgressBar(
     progress: Float,
@@ -878,7 +861,7 @@ internal fun ObsidianDownloadProgressBar(
         -1f
     }
 
-    val pct = (clamped * 100f).roundToInt()
+    val pct = (clamped * 100f).roundToInt().coerceIn(0, 100)
 
     Column(
         modifier = Modifier
@@ -929,13 +912,14 @@ internal fun ObsidianDownloadProgressBar(
                 .height(10.dp)
                 .clip(RoundedCornerShape(5.dp))
         ) {
+            if (size.width <= 2f || size.height <= 1f) return@Canvas
             drawRoundRect(
                 color = Color.White.copy(alpha = 0.08f),
                 cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
             )
 
             val fillWidth = (size.width * clamped).coerceIn(0f, size.width)
-            if (fillWidth > 1f) {
+            if (fillWidth > 2f) {
                 val brush = when {
                     isError -> Brush.horizontalGradient(listOf(AppPalette.AccentRed, Color(0xFFF87171)))
                     clamped >= 0.999f && !isDownloading -> Brush.horizontalGradient(
@@ -951,8 +935,10 @@ internal fun ObsidianDownloadProgressBar(
                     cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
                 )
 
-                if (isDownloading && shimmerOffset >= -0.3f) {
+                if (isDownloading && shimmerOffset >= -0.3f && fillWidth > 12f) {
                     val glossX = shimmerOffset * fillWidth
+                    val sx = (glossX - 60f).coerceIn(0f, fillWidth - 4f)
+                    val ex = (glossX + 60f).coerceIn(sx + 2f, fillWidth)
                     drawRoundRect(
                         brush = Brush.horizontalGradient(
                             colors = listOf(
@@ -960,8 +946,8 @@ internal fun ObsidianDownloadProgressBar(
                                 Color.White.copy(alpha = 0.45f),
                                 Color.Transparent
                             ),
-                            startX = (glossX - 60f).coerceAtLeast(0f),
-                            endX = (glossX + 60f).coerceAtMost(fillWidth)
+                            startX = sx,
+                            endX = ex
                         ),
                         size = Size(fillWidth, size.height),
                         cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
@@ -982,6 +968,7 @@ internal fun ObsidianDownloadProgressBar(
                     .fillMaxWidth()
                     .height(6.dp)
             ) {
+                if (size.width <= 2f || size.height <= 1f) return@Canvas
                 val count = segments.size.coerceAtLeast(1)
                 val gap = 1.5.dp.toPx()
                 val segW = ((size.width - gap * (count - 1)) / count).coerceAtLeast(1f)
@@ -1022,9 +1009,6 @@ internal fun ObsidianDownloadProgressBar(
     }
 }
 
-/**
- * מד מעגלי זוהר לסטטוס המודל הלא-מקוון.
- */
 @Composable
 internal fun CircularModelGauge(
     isReady: Boolean,
@@ -1068,19 +1052,23 @@ internal fun CircularModelGauge(
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
+            if (size.minDimension <= 10f) return@Canvas
             val strokePx = 7.dp.toPx()
             val inset = strokePx + 4.dp.toPx()
-            val arcSize = Size(size.width - inset * 2f, size.height - inset * 2f)
+            val arcW = (size.width - inset * 2f).coerceAtLeast(4f)
+            val arcH = (size.height - inset * 2f).coerceAtLeast(4f)
+            val arcSize = Size(arcW, arcH)
             val topLeft = Offset(inset, inset)
 
             if (isReady || isDownloading) {
+                val glowR = (size.minDimension * 0.52f).coerceAtLeast(4f)
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(ringColor.copy(alpha = 0.24f), Color.Transparent),
                         center = center,
-                        radius = size.minDimension * 0.52f
+                        radius = glowR
                     ),
-                    radius = size.minDimension * 0.52f,
+                    radius = glowR,
                     center = center
                 )
             }
@@ -1098,7 +1086,7 @@ internal fun CircularModelGauge(
             drawArc(
                 color = ringColor,
                 startAngle = if (isDownloading) spinAngle - 90f else -90f,
-                sweepAngle = animatedSweep,
+                sweepAngle = animatedSweep.coerceIn(1f, 360f),
                 useCenter = false,
                 topLeft = topLeft,
                 size = arcSize,
@@ -1109,7 +1097,7 @@ internal fun CircularModelGauge(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 text = when {
-                    isDownloading -> "${(progress * 100f).roundToInt()}%"
+                    isDownloading -> "${(progress.coerceIn(0f, 1f) * 100f).roundToInt()}%"
                     isReady -> "100%"
                     else -> "0%"
                 },
@@ -1130,9 +1118,6 @@ internal fun CircularModelGauge(
     }
 }
 
-/**
- * חץ כיווניות זוהר עם תנועת ריחוף עדינה בארגז בדיקת התרגום.
- */
 @Composable
 internal fun GlowingDownArrow(
     active: Boolean,
@@ -1163,14 +1148,16 @@ internal fun GlowingDownArrow(
             .size(34.dp)
             .offset(y = bobOffset.dp)
     ) {
+        if (size.minDimension <= 4f) return@Canvas
         val cx = size.width / 2f
+        val glowR = (size.minDimension * 0.55f).coerceAtLeast(4f)
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(AppPalette.ElectricCyan.copy(alpha = glowAlpha), Color.Transparent),
                 center = Offset(cx, size.height / 2f),
-                radius = size.minDimension * 0.55f
+                radius = glowR
             ),
-            radius = size.minDimension * 0.55f,
+            radius = glowR,
             center = Offset(cx, size.height / 2f)
         )
         val stroke = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
@@ -1185,9 +1172,6 @@ internal fun GlowingDownArrow(
     }
 }
 
-/**
- * תיבת תוצאת תרגום עם אפקט נצנוץ Shimmer וחשיפה מדורגת.
- */
 @Composable
 internal fun ShimmerTranslationResultBox(
     isLoading: Boolean,
@@ -1281,9 +1265,6 @@ internal fun ShimmerTranslationResultBox(
     }
 }
 
-/**
- * מתג הגדרות מעוצב עם מעבר צבעים חלק (200ms) ורטט מיקרו.
- */
 @Composable
 internal fun ObsidianToggleSwitch(
     checked: Boolean,
@@ -1334,9 +1315,6 @@ internal fun ObsidianToggleSwitch(
     }
 }
 
-/**
- * תפריט ניווט תחתון צף (Floating Glassmorphic Bar) עם הילת Spotlight מחליקה וקפיצת אייקון.
- */
 @Composable
 internal fun FloatingGlassBottomBar(
     selectedTab: AppTab,
@@ -1357,6 +1335,7 @@ internal fun FloatingGlassBottomBar(
             .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(32.dp))
             .padding(horizontal = 6.dp, vertical = 6.dp)
     ) {
+        if (maxWidth <= 0.dp) return@BoxWithConstraints
         val tabWidth = maxWidth / tabs.size
         val spotlightOffset by animateDpAsState(
             targetValue = tabWidth * selectedIndex,
@@ -1416,7 +1395,9 @@ internal fun FloatingGlassBottomBar(
                             indication = null
                         ) {
                             if (!isSelected) {
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                CrashGuard.safeRun("TabHaptic") {
+                                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                }
                                 onTabSelected(tab)
                             }
                         },
@@ -1454,6 +1435,7 @@ private fun NavTabIcon(
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
+        if (w <= 4f || h <= 4f) return@Canvas
         val stroke = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
 
         when (tab) {
@@ -1564,8 +1546,8 @@ private fun NavTabIcon(
 }
 
 /**
- * מנוע אפקטים ואנימציות לשכבת ה-Overlay (גל סריקה חשמלי + חלקיקי אור + חשיפת בלוקים רכה).
- * אינו משנה את חלון הצד — מופעל רק על שכבת התרגומים.
+ * מנוע אפקטים מוקשח לשכבת ה-Overlay — ללא setShadowLayer בעייתי על GPU,
+ * ועם הגנות מלאות נגד ערכי גבול ב-LinearGradient.
  */
 class OverlayEffectController(
     private val onInvalidate: () -> Unit
@@ -1579,10 +1561,12 @@ class OverlayEffectController(
     private val waveBandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
+    private val waveHaloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
     private val waveCorePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AndroidColor.parseColor("#E0F2FE")
         style = Paint.Style.FILL
-        setShadowLayer(20f, 0f, 0f, AndroidColor.parseColor("#38BDF8"))
     }
     private val sparkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -1594,70 +1578,76 @@ class OverlayEffectController(
 
     private val sparkSeeds = List(14) { i ->
         Triple(
-            ((i * 43 + 17) % 94 + 3) / 100f,  // X ratio
-            ((i * 29 + 11) % 100) / 100f,     // Trail distance ratio
-            2.2f + (i % 3) * 1.4f             // Radius px
+            ((i * 43 + 17) % 94 + 3) / 100f,
+            ((i * 29 + 11) % 100) / 100f,
+            2.2f + (i % 3) * 1.4f
         )
     }
 
     fun startFullScanWave() {
-        animator?.cancel()
-        mode = Mode.FULL_WAVE
-        fraction = 0f
+        CrashGuard.safeRun("OverlayEffect.startWave") {
+            animator?.cancel()
+            mode = Mode.FULL_WAVE
+            fraction = 0.01f
 
-        animator = ValueAnimator.ofFloat(0f, 1.08f).apply {
-            duration = 560L
-            interpolator = PathInterpolator(0.22f, 1f, 0.36f, 1f)
-            addUpdateListener { anim ->
-                fraction = anim.animatedValue as Float
-                onInvalidate()
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    mode = Mode.NONE
-                    fraction = 1f
+            animator = ValueAnimator.ofFloat(0.01f, 1.08f).apply {
+                duration = 560L
+                interpolator = PathInterpolator(0.22f, 1f, 0.36f, 1f)
+                addUpdateListener { anim ->
+                    fraction = (anim.animatedValue as? Float) ?: 1f
                     onInvalidate()
                 }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        mode = Mode.NONE
+                        fraction = 1f
+                        onInvalidate()
+                    }
 
-                override fun onAnimationCancel(animation: Animator) {
-                    mode = Mode.NONE
-                    fraction = 1f
-                }
-            })
-            start()
+                    override fun onAnimationCancel(animation: Animator) {
+                        mode = Mode.NONE
+                        fraction = 1f
+                    }
+                })
+                start()
+            }
         }
     }
 
     fun startBlockReveal() {
-        animator?.cancel()
-        mode = Mode.BLOCK_FADE
-        fraction = 0f
+        CrashGuard.safeRun("OverlayEffect.startReveal") {
+            animator?.cancel()
+            mode = Mode.BLOCK_FADE
+            fraction = 0f
 
-        animator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 240L
-            interpolator = PathInterpolator(0.22f, 1f, 0.36f, 1f)
-            addUpdateListener { anim ->
-                fraction = anim.animatedValue as Float
-                onInvalidate()
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: Animator) {
-                    mode = Mode.NONE
-                    fraction = 1f
+            animator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 240L
+                interpolator = PathInterpolator(0.22f, 1f, 0.36f, 1f)
+                addUpdateListener { anim ->
+                    fraction = (anim.animatedValue as? Float) ?: 1f
                     onInvalidate()
                 }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        mode = Mode.NONE
+                        fraction = 1f
+                        onInvalidate()
+                    }
 
-                override fun onAnimationCancel(animation: Animator) {
-                    mode = Mode.NONE
-                    fraction = 1f
-                }
-            })
-            start()
+                    override fun onAnimationCancel(animation: Animator) {
+                        mode = Mode.NONE
+                        fraction = 1f
+                    }
+                })
+                start()
+            }
         }
     }
 
     fun stop() {
-        animator?.cancel()
+        CrashGuard.safeRun("OverlayEffect.stop") {
+            animator?.cancel()
+        }
         animator = null
         mode = Mode.NONE
         fraction = 1f
@@ -1688,12 +1678,13 @@ class OverlayEffectController(
     }
 
     fun drawScanWave(canvas: AndroidCanvas, width: Float, height: Float) {
-        if (mode != Mode.FULL_WAVE) return
-        val waveY = fraction * height.coerceAtLeast(1f)
-        if (waveY >= height + 90f) return
+        if (mode != Mode.FULL_WAVE || width <= 2f || height <= 2f) return
+        val waveY = fraction * height
+        if (waveY <= 4f || waveY >= height + 90f) return
 
         val trailHeight = 155f
         val bandTop = (waveY - trailHeight).coerceAtLeast(0f)
+        if (waveY - bandTop <= 2f) return
 
         waveBandPaint.shader = LinearGradient(
             0f,
@@ -1710,9 +1701,28 @@ class OverlayEffectController(
             Shader.TileMode.CLAMP
         )
         canvas.drawRect(0f, bandTop, width, waveY, waveBandPaint)
-        canvas.drawRect(0f, waveY - 4f, width, waveY + 2f, waveCorePaint)
 
-        // Trailing electric light sparks
+        // Soft GPU-safe halo around the core beam instead of setShadowLayer
+        val haloTop = (waveY - 14f).coerceAtLeast(0f)
+        val haloBottom = (waveY + 14f).coerceAtMost(height)
+        if (haloBottom - haloTop > 2f) {
+            waveHaloPaint.shader = LinearGradient(
+                0f,
+                haloTop,
+                0f,
+                haloBottom,
+                intArrayOf(
+                    AndroidColor.TRANSPARENT,
+                    AndroidColor.parseColor("#CC38BDF8"),
+                    AndroidColor.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.5f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            canvas.drawRect(0f, haloTop, width, haloBottom, waveHaloPaint)
+        }
+        canvas.drawRect(0f, waveY - 2.5f, width, waveY + 1.5f, waveCorePaint)
+
         for ((xRatio, distRatio, radius) in sparkSeeds) {
             val sx = width * xRatio
             val sy = waveY - (distRatio * trailHeight * 0.85f)
@@ -1725,11 +1735,12 @@ class OverlayEffectController(
 }
 
 internal fun lerpFloat(start: Float, stop: Float, fraction: Float): Float {
-    return start + (stop - start) * fraction
+    val t = fraction.coerceIn(0f, 1f)
+    return start + (stop - start) * t
 }
 
 internal fun formatDownloadSpeed(bytesPerSec: Long): String {
-    val kb = bytesPerSec / 1024.0
+    val kb = bytesPerSec.coerceAtLeast(0L) / 1024.0
     return if (kb >= 1024.0) {
         String.format(Locale.US, "%.1f MB/s", kb / 1024.0)
     } else {
