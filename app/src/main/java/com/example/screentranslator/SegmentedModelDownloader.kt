@@ -26,6 +26,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
+typealias DownloadProgressMap = Map<String, DownloadProgressState>
+
 enum class DownloadStatus {
     IDLE,
     PROBING,
@@ -58,8 +60,8 @@ class SegmentedModelDownloader(context: Context) {
     }
 
     private val activeJobs = ConcurrentHashMap<String, Job>()
-    private val _progressMap = MutableStateFlow>(emptyMap())
-    val progressMap: StateFlow> = _progressMap.asStateFlow()
+    private val _progressMap: MutableStateFlow<DownloadProgressMap> = MutableStateFlow(emptyMap())
+    val progressMap: StateFlow<DownloadProgressMap> = _progressMap.asStateFlow()
 
     fun getPackFile(modelId: String): File {
         val safeName = modelId.replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -90,9 +92,9 @@ class SegmentedModelDownloader(context: Context) {
     }
 
     private fun updateState(modelId: String, state: DownloadProgressState) {
-        _progressMap.value = _progressMap.value.toMutableMap().apply {
-            put(modelId, state)
-        }
+        val updated = HashMap<String, DownloadProgressState>(_progressMap.value)
+        updated[modelId] = state
+        _progressMap.value = updated
     }
 
     /**
@@ -180,9 +182,10 @@ class SegmentedModelDownloader(context: Context) {
                 )
             }
 
+            val currentSnapshot = _progressMap.value[modelId] ?: DownloadProgressState(modelId = modelId)
             updateState(
                 modelId,
-                (_progressMap.value[modelId] ?: DownloadProgressState(modelId = modelId)).copy(
+                currentSnapshot.copy(
                     status = DownloadStatus.VERIFYING,
                     progress = 0.99f,
                     messageHe = "מאמת שלמות קובץ..."
@@ -254,7 +257,6 @@ class SegmentedModelDownloader(context: Context) {
     )
 
     private fun probeRemoteFile(urlString: String): RemoteProbe {
-        // First try lightweight Range probe (bytes=0-0) — works reliably even when servers block HEAD
         val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             instanceFollowRedirects = true
