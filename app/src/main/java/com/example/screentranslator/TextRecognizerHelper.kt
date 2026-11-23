@@ -8,6 +8,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
@@ -36,6 +37,9 @@ class TextRecognizerHelper {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val latinWordRegex = Regex("[A-Za-z\\u00C0-\\u024F\\u1E00-\\u1EFF]{2,}")
 
+    @Volatile
+    private var isClosed = false
+
     suspend fun recognize(
         bitmap: Bitmap,
         targetLang: LanguageOption = LanguageCatalog.defaultTarget,
@@ -47,26 +51,44 @@ class TextRecognizerHelper {
         maxBottomY: Int = Int.MAX_VALUE,
         excludeRect: Rect? = null
     ): List<RecognizedBlock> {
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
-        val visionText = recognizer.process(inputImage).await()
+        if (isClosed || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+            return emptyList()
+        }
+
+        val visionText = try {
+            val inputImage = InputImage.fromBitmap(bitmap, 0)
+            recognizer.process(inputImage).await()
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            CrashGuard.recordError("TextRecognizer.process", t)
+            return emptyList()
+        }
+
         return withContext(Dispatchers.Default) {
-            extractBlocks(
-                bitmap = bitmap,
-                visionText = visionText,
-                targetLang = targetLang,
-                bitmapOffsetX = bitmapOffsetX,
-                bitmapOffsetY = bitmapOffsetY,
-                scaleX = scaleX,
-                scaleY = scaleY,
-                minTopY = minTopY,
-                maxBottomY = maxBottomY,
-                excludeRect = excludeRect
-            )
+            if (isClosed || bitmap.isRecycled) return@withContext emptyList()
+            CrashGuard.safeCall("TextRecognizer.extractBlocks", emptyList()) {
+                extractBlocks(
+                    bitmap = bitmap,
+                    visionText = visionText,
+                    targetLang = targetLang,
+                    bitmapOffsetX = bitmapOffsetX,
+                    bitmapOffsetY = bitmapOffsetY,
+                    scaleX = scaleX,
+                    scaleY = scaleY,
+                    minTopY = minTopY,
+                    maxBottomY = maxBottomY,
+                    excludeRect = excludeRect
+                )
+            }
         }
     }
 
     fun close() {
-        runCatching { recognizer.close() }
+        isClosed = true
+        CrashGuard.safeRun("TextRecognizer.close") {
+            recognizer.close()
+        }
     }
 
     private fun extractBlocks(
@@ -233,7 +255,7 @@ class TextRecognizerHelper {
             }
         }
 
-        val palette = sampleExactPalette(bitmap, localBox)
+        val palette = sampleExactPaletteSafe(bitmap, localBox)
         return RecognizedBlock(
             text = cleanText,
             bounds = screenBox,
@@ -255,12 +277,27 @@ class TextRecognizerHelper {
         val needsShadow: Boolean
     )
 
-    private fun sampleExactPalette(bitmap: Bitmap, box: Rect): SampledPalette {
+    private fun sampleExactPaletteSafe(bitmap: Bitmap, box: Rect): SampledPalette {
+        val defaultPalette = SampledPalette(
+            bgTopColor = Color.rgb(20, 23, 31),
+            bgBottomColor = Color.rgb(20, 23, 31),
+            textColor = Color.WHITE,
+            needsShadow = false
+        )
+        if (bitmap.isRecycled) return defaultPalette
+        return CrashGuard.safeCall("TextRecognizer.samplePalette", defaultPalette) {
+            sampleExactPalette(bitmap, box, defaultPalette)
+        }
+    }
+
+    private fun sampleExactPalette(
+        bitmap: Bitmap,
+        box: Rect,
+        fallback: SampledPalette
+    ): SampledPalette {
         val w = bitmap.width
         val h = bitmap.height
-        if (w <= 4 || h <= 4) {
-            return SampledPalette(Color.rgb(20, 23, 31), Color.rgb(20, 23, 31), Color.WHITE, false)
-        }
+        if (w <= 4 || h <= 4) return fallback
 
         val padX = 4
         val padY = 4
@@ -271,6 +308,9 @@ class TextRecognizerHelper {
 
         val regW = (regRight - regLeft + 1).coerceAtLeast(1)
         val regH = (regBottom - regTop + 1).coerceAtLeast(1)
+        // Guard against oversized single-box pixel allocation on huge images
+        if (regW.toLong() * regH.toLong() > 1_500_000L) return fallback
+
         val pixels = IntArray(regW * regH)
         bitmap.getPixels(pixels, 0, regW, regLeft, regTop, regW, regH)
 
