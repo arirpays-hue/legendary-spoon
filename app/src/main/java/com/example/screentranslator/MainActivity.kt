@@ -5,17 +5,29 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Color as AndroidColor
+import android.graphics.ImageDecoder
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Shader
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextDirectionHeuristics
+import android.text.TextPaint
 import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -35,6 +47,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -92,10 +105,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -108,10 +124,16 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -143,10 +165,16 @@ private enum class PickerMode {
     TARGET
 }
 
+private data class TranslatedImageEntry(
+    val sourceText: String,
+    val translatedText: String
+)
+
 class MainActivity : ComponentActivity() {
 
     private lateinit var translationEngine: ScreenTranslationEngine
     private lateinit var segmentedDownloader: SegmentedModelDownloader
+    private val imageRecognizer = TextRecognizerHelper()
     private val prefs by lazy { getSharedPreferences("screen_translator_prefs", Context.MODE_PRIVATE) }
 
     private var currentTab by mutableStateOf(AppTab.HOME)
@@ -172,10 +200,28 @@ class MainActivity : ComponentActivity() {
     private var enableScanWave by mutableStateOf(true)
     private var statusMessage by mutableStateOf("מוכן להפעלה")
 
+    // Sandbox text testing
     private var sampleInput by mutableStateOf(LanguageCatalog.defaultSource.samplePhrase)
     private var sampleOutput by mutableStateOf("")
     private var isTestingTranslation by mutableStateOf(false)
     private var translationRevealKey by mutableIntStateOf(0)
+
+    // Sandbox image translation
+    private var selectedImageUri by mutableStateOf<Uri?>(null)
+    private var originalPreviewBitmap by mutableStateOf<ImageBitmap?>(null)
+    private var translatedPreviewBitmap by mutableStateOf<ImageBitmap?>(null)
+    private var showOriginalImage by mutableStateOf(false)
+    private var isTranslatingImage by mutableStateOf(false)
+    private var imageTranslationStatus by mutableStateOf("")
+    private var imageTranslatedEntries by mutableStateOf<List<TranslatedImageEntry>>(emptyList())
+
+    private val imagePickerLauncher =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) {
+                selectedImageUri = uri
+                translateUploadedImage(uri)
+            }
+        }
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -263,6 +309,13 @@ class MainActivity : ComponentActivity() {
                         sampleOutput = sampleOutput,
                         isTestingTranslation = isTestingTranslation,
                         translationRevealKey = translationRevealKey,
+                        originalPreviewBitmap = originalPreviewBitmap,
+                        translatedPreviewBitmap = translatedPreviewBitmap,
+                        showOriginalImage = showOriginalImage,
+                        isTranslatingImage = isTranslatingImage,
+                        imageTranslationStatus = imageTranslationStatus,
+                        imageTranslatedEntries = imageTranslatedEntries,
+                        hasSelectedImage = selectedImageUri != null,
                         onOpenSourcePicker = { pickerMode = PickerMode.SOURCE },
                         onOpenTargetPicker = { pickerMode = PickerMode.TARGET },
                         onSwapLanguages = { swapLanguages() },
@@ -277,6 +330,12 @@ class MainActivity : ComponentActivity() {
                             sampleInput = sourceLang.samplePhrase
                             sampleOutput = ""
                         },
+                        onPickImageClick = { imagePickerLauncher.launch("image/*") },
+                        onRetranslateImageClick = {
+                            selectedImageUri?.let { translateUploadedImage(it) }
+                        },
+                        onToggleShowOriginalImage = { showOriginalImage = it },
+                        onClearImageClick = { clearUploadedImage() },
                         onToggleAutoMode = {
                             startInAutoMode = it
                             savePreferences()
@@ -350,6 +409,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        imageRecognizer.close()
         if (::translationEngine.isInitialized) {
             translationEngine.close()
         }
@@ -522,6 +582,336 @@ class MainActivity : ComponentActivity() {
         statusMessage = "החבילה המהירה הוסרה"
     }
 
+    private fun clearUploadedImage() {
+        selectedImageUri = null
+        originalPreviewBitmap = null
+        translatedPreviewBitmap = null
+        showOriginalImage = false
+        imageTranslationStatus = ""
+        imageTranslatedEntries = emptyList()
+    }
+
+    private fun translateUploadedImage(uri: Uri) {
+        if (isTranslatingImage) return
+        val validation = EdgeCasePolicy.validateLanguagePair(sourceLang, targetLang)
+        if (!validation.isValid) {
+            imageTranslationStatus = validation.errorHe ?: "זוג שפות לא תקין"
+            return
+        }
+
+        val currentSrc = sourceLang
+        val currentTgt = targetLang
+        isTranslatingImage = true
+        showOriginalImage = false
+        imageTranslationStatus = "סורק טקסט מהתמונה..."
+        imageTranslatedEntries = emptyList()
+
+        lifecycleScope.launch {
+            try {
+                val decoded = withContext(Dispatchers.IO) {
+                    decodeScaledSoftwareBitmap(uri, maxDimension = 1600)
+                }
+                if (decoded == null) {
+                    imageTranslationStatus = "לא ניתן לטעון את התמונה שנבחרה"
+                    isTranslatingImage = false
+                    return@launch
+                }
+
+                originalPreviewBitmap = decoded.asImageBitmap()
+                translatedPreviewBitmap = null
+
+                if (offlineOnlyMode && !isPairModelReady) {
+                    imageTranslationStatus = "מכין מודל לא-מקוון (${currentSrc.nameHe} ← ${currentTgt.nameHe})..."
+                    val prep = translationEngine.prepareModel(currentSrc, currentTgt)
+                    if (prep.isFailure) {
+                        imageTranslationStatus = "יש להוריד תחילה את המודל בלשונית מודלים"
+                        isTranslatingImage = false
+                        return@launch
+                    }
+                    isPairModelReady = true
+                    downloadedLangCodes = translationEngine.getDownloadedLanguageCodes()
+                }
+
+                imageTranslationStatus = "מזהה אזורי טקסט בתמונה..."
+                val detected = imageRecognizer.recognize(
+                    bitmap = decoded,
+                    targetLang = currentTgt
+                )
+                val eligible = detected.filterNot {
+                    translationEngine.shouldSkipText(
+                        rawText = it.text,
+                        source = currentSrc,
+                        target = currentTgt,
+                        skipBrands = skipBrandNames
+                    )
+                }
+
+                if (eligible.isEmpty()) {
+                    imageTranslationStatus = "לא זוהה טקסט מתאים ב${currentSrc.nameHe} בתמונה"
+                    isTranslatingImage = false
+                    return@launch
+                }
+
+                imageTranslationStatus = "מתרגם ${eligible.size} אזורי טקסט ל${currentTgt.nameHe}..."
+                val translatedMap = translationEngine.translateBatch(
+                    texts = eligible.map { it.text },
+                    source = currentSrc,
+                    target = currentTgt,
+                    offlineOnly = offlineOnlyMode
+                )
+
+                val translatedBlocks = eligible.mapNotNull { block ->
+                    val tr = translatedMap[block.text]?.trim().orEmpty()
+                    if (translationEngine.isValidResult(block.text, tr, currentTgt)) {
+                        block.copy(translatedText = tr)
+                    } else {
+                        null
+                    }
+                }
+
+                if (translatedBlocks.isEmpty()) {
+                    imageTranslationStatus = "לא התקבלו תרגומים חדשים לתמונה זו"
+                    isTranslatingImage = false
+                    return@launch
+                }
+
+                val rendered = withContext(Dispatchers.Default) {
+                    renderTranslatedBitmap(
+                        sourceBitmap = decoded,
+                        blocks = translatedBlocks,
+                        isTargetRtl = currentTgt.isRtl
+                    )
+                }
+
+                translatedPreviewBitmap = rendered.asImageBitmap()
+                imageTranslatedEntries = translatedBlocks.map {
+                    TranslatedImageEntry(sourceText = it.text, translatedText = it.translatedText)
+                }
+                imageTranslationStatus = "תורגמו ${translatedBlocks.size} אזורי טקסט בהצלחה"
+            } catch (_: Exception) {
+                imageTranslationStatus = "אירעה שגיאה בעיבוד התמונה"
+            } finally {
+                isTranslatingImage = false
+            }
+        }
+    }
+
+    private fun decodeScaledSoftwareBitmap(uri: Uri, maxDimension: Int): Bitmap? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val src = ImageDecoder.createSource(contentResolver, uri)
+                ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    decoder.isMutableRequired = true
+                    val w = info.size.width
+                    val h = info.size.height
+                    if (w > maxDimension || h > maxDimension) {
+                        val scale = maxDimension.toFloat() / max(w, h).toFloat()
+                        decoder.setTargetSize(
+                            (w * scale).roundToInt().coerceAtLeast(1),
+                            (h * scale).roundToInt().coerceAtLeast(1)
+                        )
+                    }
+                }
+            } else {
+                val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                contentResolver.openInputStream(uri)?.use { input ->
+                    BitmapFactory.decodeStream(input, null, boundsOpts)
+                }
+                val rawW = boundsOpts.outWidth
+                val rawH = boundsOpts.outHeight
+                if (rawW <= 0 || rawH <= 0) return null
+
+                var sampleSize = 1
+                while ((rawW / sampleSize) > maxDimension || (rawH / sampleSize) > maxDimension) {
+                    sampleSize *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                contentResolver.openInputStream(uri)?.use { input ->
+                    BitmapFactory.decodeStream(input, null, decodeOpts)
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun renderTranslatedBitmap(
+        sourceBitmap: Bitmap,
+        blocks: List<RecognizedBlock>,
+        isTargetRtl: Boolean
+    ): Bitmap {
+        val output = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = AndroidCanvas(output)
+        val canvasW = output.width
+        val canvasH = output.height
+
+        val sorted = blocks.sortedWith(compareBy<RecognizedBlock> { it.bounds.top }.thenBy { it.bounds.left })
+        val padX = max(6f, canvasW * 0.008f)
+        val padY = max(4f, canvasH * 0.005f)
+        val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        val textDir = if (isTargetRtl) TextDirectionHeuristics.RTL else TextDirectionHeuristics.LTR
+
+        for (i in sorted.indices) {
+            val block = sorted[i]
+            val text = block.translatedText
+            if (text.isEmpty()) continue
+
+            val isRotated = abs(block.angleDegrees) >= 2.5f
+            val baseW = if (isRotated) block.orientedWidth else block.bounds.width()
+            val baseH = if (isRotated) block.orientedHeight else block.bounds.height()
+            val origW = baseW.coerceAtLeast(20)
+            val origH = baseH.coerceAtLeast(16)
+            val isCompactLabel = block.lineCount == 1 && origW < (canvasW * 0.50f)
+
+            val avgLineH = origH.toFloat() / block.lineCount.coerceAtLeast(1)
+            var fontSize = (avgLineH * 0.80f).coerceIn(16f, 56f)
+
+            val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = block.textColor
+                textSize = fontSize
+                isFakeBoldText = fontSize <= 26f || block.needsTextShadow
+                if (block.needsTextShadow) {
+                    setShadowLayer(2.5f, 0f, 1.5f, AndroidColor.argb(150, 0, 0, 0))
+                }
+            }
+
+            var minAllowedLeft = 4f
+            var maxAllowedRight = canvasW - 4f
+            if (!isRotated) {
+                for (j in sorted.indices) {
+                    if (i == j) continue
+                    val other = sorted[j].bounds
+                    val vOverlap = min(block.bounds.bottom, other.bottom) - max(block.bounds.top, other.top)
+                    val minH = min(block.bounds.height(), other.height()).coerceAtLeast(1)
+                    if (vOverlap.toFloat() / minH > 0.30f) {
+                        if (other.right <= block.bounds.left + 8) {
+                            minAllowedLeft = max(minAllowedLeft, (other.right + block.bounds.left) / 2f + 2f)
+                        } else if (other.left >= block.bounds.right - 8) {
+                            maxAllowedRight = min(maxAllowedRight, (block.bounds.right + other.left) / 2f - 2f)
+                        }
+                    }
+                }
+            }
+
+            val targetRect: RectF
+            val layout: StaticLayout
+
+            if (isCompactLabel) {
+                val colLimit = (maxAllowedRight - minAllowedLeft - padX * 2f).coerceAtLeast(origW.toFloat())
+                val maxAllowedW = min(colLimit, max(origW * 1.45f, canvasW * 0.30f))
+                var measuredW = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
+
+                while (measuredW > maxAllowedW && fontSize > 13f) {
+                    fontSize -= 1.2f
+                    textPaint.textSize = fontSize
+                    measuredW = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
+                }
+
+                val layoutW = max(origW.toFloat(), min(measuredW, maxAllowedW)).toInt().coerceAtLeast(24)
+                layout = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
+                    .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                    .setTextDirection(textDir)
+                    .setIncludePad(false)
+                    .build()
+
+                val boxW = max(origW + padX * 2f, layoutW + padX * 2f)
+                val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
+                val cx = block.bounds.exactCenterX()
+                val cy = block.bounds.exactCenterY()
+
+                var left = cx - boxW / 2f
+                var right = cx + boxW / 2f
+                if (!isRotated) {
+                    if (left < minAllowedLeft) {
+                        right += (minAllowedLeft - left)
+                        left = minAllowedLeft
+                    }
+                    if (right > maxAllowedRight) {
+                        left -= (right - maxAllowedRight)
+                        right = maxAllowedRight
+                    }
+                    left = left.coerceAtLeast(minAllowedLeft)
+                    right = right.coerceAtMost(maxAllowedRight).coerceAtLeast(left + 24f)
+                }
+                val top = (cy - boxH / 2f).coerceAtLeast(2f)
+                val bottom = (top + boxH).coerceAtMost(canvasH - 2f)
+                targetRect = RectF(left, top, right, bottom)
+            } else {
+                val left = if (isRotated) {
+                    block.bounds.exactCenterX() - origW / 2f - padX
+                } else {
+                    (block.bounds.left - padX).coerceAtLeast(minAllowedLeft)
+                }
+                val right = if (isRotated) {
+                    block.bounds.exactCenterX() + origW / 2f + padX
+                } else {
+                    (block.bounds.right + padX).coerceAtMost(maxAllowedRight)
+                }
+                val layoutW = (right - left - padX * 2f).toInt().coerceAtLeast(36)
+
+                var fitted = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
+                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                    .setTextDirection(textDir)
+                    .setIncludePad(false)
+                    .build()
+                while (fitted.height > origH + padY && fontSize > 13f) {
+                    fontSize -= 1.2f
+                    textPaint.textSize = fontSize
+                    fitted = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
+                        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                        .setTextDirection(textDir)
+                        .setIncludePad(false)
+                        .build()
+                }
+                layout = fitted
+
+                val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
+                val top = if (isRotated) {
+                    block.bounds.exactCenterY() - boxH / 2f
+                } else {
+                    (block.bounds.top - padY).coerceAtLeast(2f)
+                }
+                val bottom = (top + boxH).coerceAtMost(canvasH - 2f)
+                targetRect = RectF(left, top, right, bottom)
+            }
+
+            val topCol = block.bgTopColor or -0x1000000
+            val botCol = block.bgBottomColor or -0x1000000
+            if (topCol != botCol) {
+                boxPaint.shader = LinearGradient(
+                    targetRect.left,
+                    targetRect.top,
+                    targetRect.left,
+                    targetRect.bottom,
+                    topCol,
+                    botCol,
+                    Shader.TileMode.CLAMP
+                )
+            } else {
+                boxPaint.shader = null
+                boxPaint.color = topCol
+            }
+
+            canvas.save()
+            if (isRotated) {
+                canvas.rotate(block.angleDegrees, targetRect.centerX(), targetRect.centerY())
+            }
+            canvas.drawRoundRect(targetRect, 8f, 8f, boxPaint)
+
+            val textLeft = targetRect.left + (targetRect.width() - layout.width) / 2f
+            val textTop = targetRect.top + (targetRect.height() - layout.height) / 2f
+            canvas.translate(textLeft, textTop)
+            layout.draw(canvas)
+            canvas.restore()
+        }
+
+        return output
+    }
+
     private fun testTranslation() {
         if (isTestingTranslation) return
         val validation = EdgeCasePolicy.validateLanguagePair(sourceLang, targetLang)
@@ -629,7 +1019,7 @@ private fun ScreenTranslatorAppShell(
     pairValidation: EdgeCasePolicy.PairValidationResult,
     supportedModels: List<ModelOption>,
     downloadedLangCodes: Set<String>,
-    downloadStates: Map<String, DownloadProgressState>,
+    downloadStates: DownloadProgressMap,
     hasOverlayPermission: Boolean,
     hasNotificationPermission: Boolean,
     isPairModelReady: Boolean,
@@ -648,6 +1038,13 @@ private fun ScreenTranslatorAppShell(
     sampleOutput: String,
     isTestingTranslation: Boolean,
     translationRevealKey: Int,
+    originalPreviewBitmap: ImageBitmap?,
+    translatedPreviewBitmap: ImageBitmap?,
+    showOriginalImage: Boolean,
+    isTranslatingImage: Boolean,
+    imageTranslationStatus: String,
+    imageTranslatedEntries: List<TranslatedImageEntry>,
+    hasSelectedImage: Boolean,
     onOpenSourcePicker: () -> Unit,
     onOpenTargetPicker: () -> Unit,
     onSwapLanguages: () -> Unit,
@@ -659,6 +1056,10 @@ private fun ScreenTranslatorAppShell(
     onDeleteFastPackClick: (String) -> Unit,
     onSampleInputChange: (String) -> Unit,
     onResetSamplePhrase: () -> Unit,
+    onPickImageClick: () -> Unit,
+    onRetranslateImageClick: () -> Unit,
+    onToggleShowOriginalImage: (Boolean) -> Unit,
+    onClearImageClick: () -> Unit,
     onToggleAutoMode: (Boolean) -> Unit,
     onToggleOfflineOnly: (Boolean) -> Unit,
     onToggleSkipBrands: (Boolean) -> Unit,
@@ -764,11 +1165,22 @@ private fun ScreenTranslatorAppShell(
                     sampleOutput = sampleOutput,
                     isTestingTranslation = isTestingTranslation,
                     translationRevealKey = translationRevealKey,
+                    originalPreviewBitmap = originalPreviewBitmap,
+                    translatedPreviewBitmap = translatedPreviewBitmap,
+                    showOriginalImage = showOriginalImage,
+                    isTranslatingImage = isTranslatingImage,
+                    imageTranslationStatus = imageTranslationStatus,
+                    imageTranslatedEntries = imageTranslatedEntries,
+                    hasSelectedImage = hasSelectedImage,
                     onOpenSourcePicker = onOpenSourcePicker,
                     onOpenTargetPicker = onOpenTargetPicker,
                     onSwapLanguages = onSwapLanguages,
                     onSampleInputChange = onSampleInputChange,
                     onResetSamplePhrase = onResetSamplePhrase,
+                    onPickImageClick = onPickImageClick,
+                    onRetranslateImageClick = onRetranslateImageClick,
+                    onToggleShowOriginalImage = onToggleShowOriginalImage,
+                    onClearImageClick = onClearImageClick,
                     onDownloadMlKitClick = onDownloadMlKitClick,
                     onTestTranslationClick = onTestTranslationClick
                 )
@@ -877,7 +1289,6 @@ private fun HomeTabScreen(
             )
         }
 
-        // Edge case warning banner (e.g. non-Latin source OCR note)
         pairValidation.warningHe?.let { warning ->
             Row(
                 modifier = Modifier
@@ -966,7 +1377,7 @@ private fun ModelsTabScreen(
     pairValidation: EdgeCasePolicy.PairValidationResult,
     supportedModels: List<ModelOption>,
     downloadedLangCodes: Set<String>,
-    downloadStates: Map<String, DownloadProgressState>,
+    downloadStates: DownloadProgressMap,
     isPairModelReady: Boolean,
     isDownloadingMlKit: Boolean,
     mlKitDownloadProgress: Float,
@@ -1007,7 +1418,6 @@ private fun ModelsTabScreen(
             )
         }
 
-        // Source & Target Language Selector Card
         GlassCard {
             Text(
                 text = "בחירת שפות תרגום",
@@ -1034,7 +1444,6 @@ private fun ModelsTabScreen(
             }
         }
 
-        // Dynamic Supported Models for selected language pair
         Text(
             text = "מודלים תומכים עבור ${sourceLang.nameHe} ← ${targetLang.nameHe}",
             color = TextSecondary,
@@ -1295,7 +1704,6 @@ private fun ModelsTabScreen(
             }
         }
 
-        // Downloaded languages summary & RAM cache control
         GlassCard {
             Text(
                 text = "שפות מותקנות במכשיר (${downloadedLangCodes.size})",
@@ -1351,11 +1759,22 @@ private fun TestTabScreen(
     sampleOutput: String,
     isTestingTranslation: Boolean,
     translationRevealKey: Int,
+    originalPreviewBitmap: ImageBitmap?,
+    translatedPreviewBitmap: ImageBitmap?,
+    showOriginalImage: Boolean,
+    isTranslatingImage: Boolean,
+    imageTranslationStatus: String,
+    imageTranslatedEntries: List<TranslatedImageEntry>,
+    hasSelectedImage: Boolean,
     onOpenSourcePicker: () -> Unit,
     onOpenTargetPicker: () -> Unit,
     onSwapLanguages: () -> Unit,
     onSampleInputChange: (String) -> Unit,
     onResetSamplePhrase: () -> Unit,
+    onPickImageClick: () -> Unit,
+    onRetranslateImageClick: () -> Unit,
+    onToggleShowOriginalImage: (Boolean) -> Unit,
+    onClearImageClick: () -> Unit,
     onDownloadMlKitClick: () -> Unit,
     onTestTranslationClick: () -> Unit
 ) {
@@ -1378,7 +1797,7 @@ private fun TestTabScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "${sourceLang.nameHe} ← ${targetLang.nameHe} • בדיקה והורדה",
+                text = "${sourceLang.nameHe} ← ${targetLang.nameHe} • בדיקת טקסט ותמונות",
                 color = TextSecondary,
                 fontSize = 13.sp
             )
@@ -1392,6 +1811,184 @@ private fun TestTabScreen(
                 onOpenTargetPicker = onOpenTargetPicker,
                 onSwapLanguages = onSwapLanguages
             )
+        }
+
+        // Image Upload & Visual Translation Card
+        GlassCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "תרגום תמונה מהגלריה",
+                        color = TextPrimary,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "העלה צילום מסך או תמונה ותראה את התרגום מוטמע ישירות עליה",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                if (translatedPreviewBitmap != null) {
+                    StatusPillBadge(
+                        label = if (showOriginalImage) "מקור" else "מתורגם",
+                        color = if (showOriginalImage) AccentAmber else EmeraldGreen,
+                        modifier = Modifier.clickable {
+                            onToggleShowOriginalImage(!showOriginalImage)
+                        }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val activeBitmap = if (showOriginalImage) {
+                originalPreviewBitmap
+            } else {
+                translatedPreviewBitmap ?: originalPreviewBitmap
+            }
+
+            if (activeBitmap != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 180.dp, max = 380.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(GlassCardInner)
+                        .border(1.dp, GlassBorder, RoundedCornerShape(16.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        bitmap = activeBitmap,
+                        contentDescription = "תמונה מתורגמת",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (isTranslatingImage) {
+                        Box(
+                            modifier = Modifier
+                                .matchParentSize()
+                                .background(BgObsidian.copy(alpha = 0.65f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(28.dp),
+                                    color = ElectricCyan,
+                                    strokeWidth = 2.5.dp
+                                )
+                                Text(
+                                    text = imageTranslationStatus.ifEmpty { "מתרגם תמונה..." },
+                                    color = TextPrimary,
+                                    fontSize = 13.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (imageTranslationStatus.isNotEmpty() && !isTranslatingImage) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = imageTranslationStatus,
+                    color = if (translatedPreviewBitmap != null) EmeraldGreen else TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = onPickImageClick,
+                    enabled = !isTranslatingImage,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(46.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
+                ) {
+                    Text(
+                        text = if (hasSelectedImage) "העלה תמונה אחרת" else "העלה תמונה לתרגום",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (hasSelectedImage && !isTranslatingImage) {
+                    OutlinedButton(
+                        onClick = onRetranslateImageClick,
+                        modifier = Modifier.height(46.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = ElectricCyan.copy(alpha = 0.10f)
+                        )
+                    ) {
+                        Text("תרגם שוב", color = ElectricCyan, fontSize = 13.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = onClearImageClick,
+                        modifier = Modifier.height(46.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, GlassBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.White.copy(alpha = 0.04f)
+                        )
+                    ) {
+                        Text("נקה", color = TextSecondary, fontSize = 13.sp)
+                    }
+                }
+            }
+
+            if (imageTranslatedEntries.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(thickness = 1.dp, color = GlassBorder)
+                Spacer(modifier = Modifier.height(10.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    imageTranslatedEntries.take(8).forEach { entry ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(GlassCardInner)
+                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            CompositionLocalProvider(LocalLayoutDirection provides inputDir) {
+                                Text(
+                                    text = entry.sourceText,
+                                    color = TextSecondary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            CompositionLocalProvider(LocalLayoutDirection provides outputDir) {
+                                Text(
+                                    text = entry.translatedText,
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         ModelGaugeCard(
@@ -1412,7 +2009,7 @@ private fun TestTabScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "בדיקת איכות תרגום",
+                    text = "בדיקת תרגום טקסט",
                     color = TextPrimary,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold
@@ -1522,7 +2119,6 @@ private fun SettingsTabScreen(
 ) {
     var visualCardFlash by remember { mutableIntStateOf(0) }
     var filterCardFlash by remember { mutableIntStateOf(0) }
-    var showEdgeCasesPlaybook by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -1540,7 +2136,7 @@ private fun SettingsTabScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "הרשאות, אפקטים ומדריך מצבי קיצון",
+                text = "הרשאות, אפקטים והתאמת שכבת התרגום",
                 color = TextSecondary,
                 fontSize = 13.sp
             )
@@ -1662,87 +2258,6 @@ private fun SettingsTabScreen(
                     onToggleOfflineOnly(it)
                 }
             )
-        }
-
-        // EdgeCasePolicy Playbook Viewer
-        GlassCard {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showEdgeCasesPlaybook = !showEdgeCasesPlaybook },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "מדריך מצבי קיצון והגנות (${EdgeCasePolicy.playbook.size})",
-                        color = TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "לחץ לצפייה בכללי האפליקציה לטיפול בתקלות, רשת, זיכרון ופרטיות",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                }
-                StatusPillBadge(
-                    label = if (showEdgeCasesPlaybook) "סגור" else "הצג",
-                    color = ElectricCyan
-                )
-            }
-
-            AnimatedVisibility(visible = showEdgeCasesPlaybook) {
-                Column(
-                    modifier = Modifier.padding(top = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    EdgeCasePolicy.playbook.forEach { item ->
-                        val sevColor = when (item.severity) {
-                            EdgeCasePolicy.Severity.CRITICAL -> AccentRed
-                            EdgeCasePolicy.Severity.HIGH -> AccentAmber
-                            EdgeCasePolicy.Severity.MEDIUM -> ElectricCyan
-                            EdgeCasePolicy.Severity.LOW -> EmeraldGreen
-                        }
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(GlassCardInner)
-                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "${item.id} • ${item.titleHe}",
-                                    color = TextPrimary,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                StatusPillBadge(label = item.severity.labelHe, color = sevColor)
-                            }
-                            Text(
-                                text = "טריגר: ${item.triggerHe}",
-                                color = TextSecondary,
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp
-                            )
-                            Text(
-                                text = "טיפול: ${item.resolutionHe}",
-                                color = Color(0xFFCBD5E1),
-                                fontSize = 11.sp,
-                                lineHeight = 16.sp
-                            )
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -1964,10 +2479,6 @@ private fun LanguagePickerDialog(
     }
 }
 
-/**
- * פס התקדמות מותאם לסגנון Dark Obsidian & Glass, הכולל מילוי זוהר,
- * חיווי אחוזים ומהירות, ותצוגה חיה של 60 החלקים המקבילים במודלים תומכים.
- */
 @Composable
 private fun ObsidianDownloadProgressBar(
     progress: Float,
@@ -2042,14 +2553,12 @@ private fun ObsidianDownloadProgressBar(
             )
         }
 
-        // Main glossy obsidian progress bar
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(10.dp)
                 .clip(RoundedCornerShape(5.dp))
         ) {
-            // Track
             drawRoundRect(
                 color = Color.White.copy(alpha = 0.08f),
                 cornerRadius = CornerRadius(size.height / 2f, size.height / 2f)
@@ -2091,7 +2600,6 @@ private fun ObsidianDownloadProgressBar(
             }
         }
 
-        // 60-segment micro visualizer when segmented downloading is active
         if (isSegmented && totalParts > 1) {
             val segments = if (segmentProgress.size == totalParts) {
                 segmentProgress
