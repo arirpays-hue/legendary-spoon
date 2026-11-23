@@ -34,11 +34,11 @@ data class RecognizedBlock(
 
 class TextRecognizerHelper {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    private val englishWordRegex = Regex("[A-Za-z]{2,}")
-    private val hebrewRegex = Regex("[\\u0590-\\u05FF]")
+    private val latinWordRegex = Regex("[A-Za-z\\u00C0-\\u024F\\u1E00-\\u1EFF]{2,}")
 
     suspend fun recognize(
         bitmap: Bitmap,
+        targetLang: LanguageOption = LanguageCatalog.defaultTarget,
         bitmapOffsetX: Int = 0,
         bitmapOffsetY: Int = 0,
         scaleX: Float = 1f,
@@ -53,6 +53,7 @@ class TextRecognizerHelper {
             extractBlocks(
                 bitmap = bitmap,
                 visionText = visionText,
+                targetLang = targetLang,
                 bitmapOffsetX = bitmapOffsetX,
                 bitmapOffsetY = bitmapOffsetY,
                 scaleX = scaleX,
@@ -71,6 +72,7 @@ class TextRecognizerHelper {
     private fun extractBlocks(
         bitmap: Bitmap,
         visionText: Text,
+        targetLang: LanguageOption,
         bitmapOffsetX: Int,
         bitmapOffsetY: Int,
         scaleX: Float,
@@ -85,7 +87,7 @@ class TextRecognizerHelper {
             val lines = block.lines
             if (lines.isEmpty()) continue
 
-            if (shouldSplitIntoLines(lines)) {
+            if (shouldSplitIntoLines(lines, targetLang)) {
                 for (line in lines) {
                     val box = line.boundingBox ?: continue
                     val conf = runCatching { line.confidence }.getOrNull()
@@ -137,9 +139,23 @@ class TextRecognizerHelper {
         return result
     }
 
-    private fun shouldSplitIntoLines(lines: List<Text.Line>): Boolean {
+    private fun containsTargetNonLatinScript(text: String, targetLang: LanguageOption): Boolean {
+        return when (targetLang.script) {
+            ScriptType.RTL_HEBREW -> text.any { it in '\u0590'..'\u05FF' }
+            ScriptType.RTL_ARABIC -> text.any { it in '\u0600'..'\u06FF' }
+            ScriptType.CYRILLIC -> text.any { it in '\u0400'..'\u04FF' }
+            ScriptType.GREEK -> text.any { it in '\u0370'..'\u03FF' }
+            ScriptType.DEVANAGARI -> text.any { it in '\u0900'..'\u097F' }
+            ScriptType.CJK -> text.any {
+                it in '\u3040'..'\u30FF' || it in '\u4E00'..'\u9FFF' || it in '\uAC00'..'\uD7AF'
+            }
+            ScriptType.LATIN -> false
+        }
+    }
+
+    private fun shouldSplitIntoLines(lines: List<Text.Line>, targetLang: LanguageOption): Boolean {
         if (lines.size <= 1) return false
-        if (lines.any { hebrewRegex.containsMatchIn(it.text) }) return true
+        if (lines.any { containsTargetNonLatinScript(it.text, targetLang) }) return true
 
         val boxes = lines.mapNotNull { it.boundingBox }
         if (boxes.size != lines.size) return true
@@ -174,7 +190,7 @@ class TextRecognizerHelper {
         excludeRect: Rect?
     ): RecognizedBlock? {
         val cleanText = rawText.replace('\n', ' ').replace(Regex("\\s+"), " ").trim()
-        if (cleanText.isEmpty() || !englishWordRegex.containsMatchIn(cleanText)) return null
+        if (cleanText.isEmpty() || !latinWordRegex.containsMatchIn(cleanText)) return null
 
         val screenBox = Rect(
             ((localBox.left + bitmapOffsetX) * scaleX).toInt(),
