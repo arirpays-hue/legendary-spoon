@@ -5,14 +5,15 @@ plugins {
 }
 
 val runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-val signingStorePassword = System.getenv("SIGNING_STORE_PASSWORD").orEmpty()
-val signingKeyAlias = System.getenv("SIGNING_KEY_ALIAS").orEmpty()
-val signingKeyPassword = System.getenv("SIGNING_KEY_PASSWORD").orEmpty()
 val keystoreFile = file("app-signing.jks")
-val hasPersistentSigning = keystoreFile.exists() &&
-    signingStorePassword.isNotBlank() &&
-    signingKeyAlias.isNotBlank() &&
-    signingKeyPassword.isNotBlank()
+val envStorePass = System.getenv("SIGNING_STORE_PASSWORD").orEmpty()
+val envKeyAlias = System.getenv("SIGNING_KEY_ALIAS").orEmpty()
+val envKeyPass = System.getenv("SIGNING_KEY_PASSWORD").orEmpty()
+
+val resolvedStorePassword = envStorePass.ifBlank { "translator123" }
+val resolvedKeyAlias = envKeyAlias.ifBlank { "translator_key" }
+val resolvedKeyPassword = envKeyPass.ifBlank { "translator123" }
+val hasPersistentSigning = keystoreFile.exists()
 
 android {
     namespace = "com.example.screentranslator"
@@ -22,8 +23,8 @@ android {
         applicationId = "com.example.screentranslator"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20 + runNumber
-        versionName = "1.3.$runNumber"
+        versionCode = 100 + runNumber
+        versionName = "1.4.$runNumber"
     }
 
     splits {
@@ -39,9 +40,9 @@ android {
         if (hasPersistentSigning) {
             create("persistent") {
                 storeFile = keystoreFile
-                storePassword = signingStorePassword
-                keyAlias = signingKeyAlias
-                keyPassword = signingKeyPassword
+                storePassword = resolvedStorePassword
+                keyAlias = resolvedKeyAlias
+                keyPassword = resolvedKeyPassword
             }
         }
     }
@@ -103,6 +104,6 @@ dependencies {
     // Offline OCR (Latin)
     implementation("com.google.mlkit:text-recognition:16.0.1")
 
-    // Offline Translation (English -> Hebrew)
+    // Offline Translation (Multi-language)
     implementation("com.google.mlkit:translate:17.0.3")
 }
