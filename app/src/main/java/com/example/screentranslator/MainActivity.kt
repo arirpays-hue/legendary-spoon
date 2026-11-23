@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -121,6 +122,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var segmentedDownloader: SegmentedModelDownloader
     private val imageRecognizer = TextRecognizerHelper()
     private val prefs by lazy { getSharedPreferences("screen_translator_prefs", Context.MODE_PRIVATE) }
+    private val uiErrorHandler = CrashGuard.coroutineHandler("MainActivity") {
+        statusMessage = "אירעה תקלה זמנית — הפעולה בוטלה בבטחה"
+    }
 
     private var currentTab by mutableStateOf(AppTab.HOME)
     private var pickerMode by mutableStateOf(PickerMode.NONE)
@@ -188,12 +192,19 @@ class MainActivity : ComponentActivity() {
                     putExtra(OverlayService.EXTRA_SOURCE_LANG, sourceLang.code)
                     putExtra(OverlayService.EXTRA_TARGET_LANG, targetLang.code)
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(serviceIntent)
-                } else {
-                    startService(serviceIntent)
+                val started = CrashGuard.safeCall("MainActivity.startOverlayService", false) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+                    true
                 }
-                statusMessage = "פעיל (${sourceLang.nameHe} ← ${targetLang.nameHe})"
+                statusMessage = if (started) {
+                    "פעיל (${sourceLang.nameHe} ← ${targetLang.nameHe})"
+                } else {
+                    "המערכת מנעה הפעלת שירות ברקע — נסה שוב"
+                }
             } else {
                 statusMessage = "הרשאת צילום המסך בוטלה"
             }
@@ -202,8 +213,10 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = 0xFF0B0E17.toInt()
-        window.navigationBarColor = 0xFF0B0E17.toInt()
+        CrashGuard.safeRun("MainActivity.systemBars") {
+            window.statusBarColor = 0xFF0B0E17.toInt()
+            window.navigationBarColor = 0xFF0B0E17.toInt()
+        }
 
         translationEngine = ScreenTranslationEngine(applicationContext)
         segmentedDownloader = SegmentedModelDownloader(applicationContext)
@@ -277,7 +290,7 @@ class MainActivity : ComponentActivity() {
                             sampleInput = sourceLang.samplePhrase
                             sampleOutput = ""
                         },
-                        onPickImageClick = { imagePickerLauncher.launch("image/*") },
+                        onPickImageClick = { launchImagePickerSafely() },
                         onRetranslateImageClick = {
                             selectedImageUri?.let { translateUploadedImage(it) }
                         },
@@ -369,34 +382,38 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadPreferences() {
-        sourceLang = LanguageCatalog.findByCode(
-            prefs.getString("source_lang", LanguageCatalog.defaultSource.code)
-        )
-        targetLang = LanguageCatalog.findByCode(
-            prefs.getString("target_lang", LanguageCatalog.defaultTarget.code)
-        )
-        if (sourceLang.code == targetLang.code) {
-            sourceLang = LanguageCatalog.defaultSource
-            targetLang = LanguageCatalog.defaultTarget
+        CrashGuard.safeRun("MainActivity.loadPrefs") {
+            sourceLang = LanguageCatalog.findByCode(
+                prefs.getString("source_lang", LanguageCatalog.defaultSource.code)
+            )
+            targetLang = LanguageCatalog.findByCode(
+                prefs.getString("target_lang", LanguageCatalog.defaultTarget.code)
+            )
+            if (sourceLang.code == targetLang.code) {
+                sourceLang = LanguageCatalog.defaultSource
+                targetLang = LanguageCatalog.defaultTarget
+            }
+            startInAutoMode = prefs.getBoolean("auto_mode", true)
+            offlineOnlyMode = prefs.getBoolean("offline_only", true)
+            skipBrandNames = prefs.getBoolean("skip_brands", true)
+            enableScanWave = prefs.getBoolean("scan_wave", true)
+            enableUiAnimations = prefs.getBoolean("ui_animations", true)
+            sampleInput = sourceLang.samplePhrase
         }
-        startInAutoMode = prefs.getBoolean("auto_mode", true)
-        offlineOnlyMode = prefs.getBoolean("offline_only", true)
-        skipBrandNames = prefs.getBoolean("skip_brands", true)
-        enableScanWave = prefs.getBoolean("scan_wave", true)
-        enableUiAnimations = prefs.getBoolean("ui_animations", true)
-        sampleInput = sourceLang.samplePhrase
     }
 
     private fun savePreferences() {
-        prefs.edit()
-            .putString("source_lang", sourceLang.code)
-            .putString("target_lang", targetLang.code)
-            .putBoolean("auto_mode", startInAutoMode)
-            .putBoolean("offline_only", offlineOnlyMode)
-            .putBoolean("skip_brands", skipBrandNames)
-            .putBoolean("scan_wave", enableScanWave)
-            .putBoolean("ui_animations", enableUiAnimations)
-            .apply()
+        CrashGuard.safeRun("MainActivity.savePrefs") {
+            prefs.edit()
+                .putString("source_lang", sourceLang.code)
+                .putString("target_lang", targetLang.code)
+                .putBoolean("auto_mode", startInAutoMode)
+                .putBoolean("offline_only", offlineOnlyMode)
+                .putBoolean("skip_brands", skipBrandNames)
+                .putBoolean("scan_wave", enableScanWave)
+                .putBoolean("ui_animations", enableUiAnimations)
+                .apply()
+        }
     }
 
     private fun applyLanguagePair(newSource: LanguageOption, newTarget: LanguageOption) {
@@ -416,12 +433,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshPermissionStates() {
-        hasOverlayPermission = Settings.canDrawOverlays(this)
+        hasOverlayPermission = CrashGuard.safeCall("MainActivity.canDrawOverlays", false) {
+            Settings.canDrawOverlays(this)
+        }
         hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
+            CrashGuard.safeCall("MainActivity.notifPerm", true) {
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            }
         } else {
             true
         }
@@ -430,7 +451,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshModelStates() {
         val currentSrc = sourceLang
         val currentTgt = targetLang
-        lifecycleScope.launch {
+        lifecycleScope.launch(uiErrorHandler) {
             downloadedLangCodes = translationEngine.getDownloadedLanguageCodes()
             val ready = translationEngine.isPairModelDownloaded(currentSrc, currentTgt)
             if (currentSrc.code == sourceLang.code && currentTgt.code == targetLang.code) {
@@ -442,7 +463,9 @@ class MainActivity : ComponentActivity() {
                     mlKitDownloadProgress = 0f
                     statusMessage = "מודל לא הורד"
                 }
-                fastPackEntryCount = translationEngine.getOrLoadFastPack(currentSrc, currentTgt).size
+                fastPackEntryCount = withContext(Dispatchers.IO) {
+                    translationEngine.getOrLoadFastPack(currentSrc, currentTgt).size
+                }
             }
         }
     }
@@ -456,30 +479,33 @@ class MainActivity : ComponentActivity() {
         mlKitDownloadMessage = "מתחיל הורדת ${currentSrc.nameHe} ← ${currentTgt.nameHe}..."
         statusMessage = "מוריד מודל..."
 
-        lifecycleScope.launch {
-            val result = translationEngine.prepareModel(
-                source = currentSrc,
-                target = currentTgt,
-                onProgress = { progress, msg ->
-                    runOnUiThread {
-                        mlKitDownloadProgress = progress
-                        mlKitDownloadMessage = msg
+        lifecycleScope.launch(uiErrorHandler) {
+            try {
+                val result = translationEngine.prepareModel(
+                    source = currentSrc,
+                    target = currentTgt,
+                    onProgress = { progress, msg ->
+                        lifecycleScope.launch(Dispatchers.Main) {
+                            mlKitDownloadProgress = progress
+                            mlKitDownloadMessage = msg
+                        }
                     }
+                )
+                downloadedLangCodes = translationEngine.getDownloadedLanguageCodes()
+                if (result.isSuccess) {
+                    isPairModelReady = true
+                    mlKitDownloadProgress = 1f
+                    mlKitDownloadMessage = "המודל מאומת ומוכן ללא אינטרנט"
+                    statusMessage = "מוכן"
+                } else {
+                    isPairModelReady = false
+                    mlKitDownloadProgress = 0f
+                    val err = result.exceptionOrNull()?.localizedMessage ?: "שגיאת רשת"
+                    mlKitDownloadMessage = "שגיאה: $err"
+                    statusMessage = "ההורדה נכשלה"
                 }
-            )
-            isDownloadingMlKit = false
-            downloadedLangCodes = translationEngine.getDownloadedLanguageCodes()
-            if (result.isSuccess) {
-                isPairModelReady = true
-                mlKitDownloadProgress = 1f
-                mlKitDownloadMessage = "המודל מאומת ומוכן ללא אינטרנט"
-                statusMessage = "מוכן"
-            } else {
-                isPairModelReady = false
-                mlKitDownloadProgress = 0f
-                val err = result.exceptionOrNull()?.localizedMessage ?: "שגיאת רשת"
-                mlKitDownloadMessage = "שגיאה: $err"
-                statusMessage = "ההורדה נכשלה"
+            } finally {
+                isDownloadingMlKit = false
             }
         }
     }
@@ -487,7 +513,7 @@ class MainActivity : ComponentActivity() {
     private fun deleteTargetMlKitModel() {
         if (isDownloadingMlKit) return
         val targetToDelete = targetLang
-        lifecycleScope.launch {
+        lifecycleScope.launch(uiErrorHandler) {
             val res = translationEngine.deleteMlKitLanguage(targetToDelete.code)
             if (res.isSuccess) {
                 statusMessage = "מודל ${targetToDelete.nameHe} הוסר מהמכשיר"
@@ -511,17 +537,19 @@ class MainActivity : ComponentActivity() {
         }
         val src = sourceLang
         val tgt = targetLang
-        lifecycleScope.launch {
+        lifecycleScope.launch(uiErrorHandler) {
             val result = segmentedDownloader.downloadSegmented(
                 modelId = modelId,
                 urlString = url,
                 requestedParts = EdgeCasePolicy.TARGET_SEGMENT_COUNT
             )
             if (result.isSuccess) {
-                val loaded = translationEngine.getOrLoadFastPack(src, tgt)
-                fastPackEntryCount = loaded.size
-                statusMessage = if (loaded.isNotEmpty()) {
-                    "נטענו ${loaded.size} מונחים לחבילה המהירה"
+                val loadedCount = withContext(Dispatchers.IO) {
+                    translationEngine.getOrLoadFastPack(src, tgt).size
+                }
+                fastPackEntryCount = loadedCount
+                statusMessage = if (loadedCount > 0) {
+                    "נטענו $loadedCount מונחים לחבילה המהירה"
                 } else {
                     "הקובץ הורד ב-60 חלקים בהצלחה"
                 }
@@ -534,6 +562,16 @@ class MainActivity : ComponentActivity() {
         fastPackEntryCount = 0
         translationEngine.clearCache()
         statusMessage = "החבילה המהירה הוסרה"
+    }
+
+    private fun launchImagePickerSafely() {
+        val launched = CrashGuard.safeCall("MainActivity.pickImage", false) {
+            imagePickerLauncher.launch("image/*")
+            true
+        }
+        if (!launched) {
+            imageTranslationStatus = "לא נמצאה אפליקציית גלריה זמינה במכשיר"
+        }
     }
 
     private fun clearUploadedImage() {
@@ -560,14 +598,13 @@ class MainActivity : ComponentActivity() {
         imageTranslationStatus = "סורק טקסט מהתמונה..."
         imageTranslatedEntries = emptyList()
 
-        lifecycleScope.launch {
+        lifecycleScope.launch(uiErrorHandler) {
             try {
                 val decoded = withContext(Dispatchers.IO) {
-                    decodeScaledSoftwareBitmap(uri, maxDimension = 1600)
+                    decodeScaledSoftwareBitmap(uri, maxDimension = 1400)
                 }
                 if (decoded == null) {
-                    imageTranslationStatus = "לא ניתן לטעון את התמונה שנבחרה"
-                    isTranslatingImage = false
+                    imageTranslationStatus = "לא ניתן לטעון את התמונה (ייתכן שהיא גדולה מדי או פגומה)"
                     return@launch
                 }
 
@@ -579,7 +616,6 @@ class MainActivity : ComponentActivity() {
                     val prep = translationEngine.prepareModel(currentSrc, currentTgt)
                     if (prep.isFailure) {
                         imageTranslationStatus = "יש להוריד תחילה את המודל בלשונית מודלים"
-                        isTranslatingImage = false
                         return@launch
                     }
                     isPairModelReady = true
@@ -602,7 +638,6 @@ class MainActivity : ComponentActivity() {
 
                 if (eligible.isEmpty()) {
                     imageTranslationStatus = "לא זוהה טקסט מתאים ב${currentSrc.nameHe} בתמונה"
-                    isTranslatingImage = false
                     return@launch
                 }
 
@@ -625,7 +660,6 @@ class MainActivity : ComponentActivity() {
 
                 if (translatedBlocks.isEmpty()) {
                     imageTranslationStatus = "לא התקבלו תרגומים חדשים לתמונה זו"
-                    isTranslatingImage = false
                     return@launch
                 }
 
@@ -637,12 +671,19 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                translatedPreviewBitmap = rendered.asImageBitmap()
-                imageTranslatedEntries = translatedBlocks.map {
-                    TranslatedImageEntry(sourceText = it.text, translatedText = it.translatedText)
+                if (rendered != null) {
+                    translatedPreviewBitmap = rendered.asImageBitmap()
+                    imageTranslatedEntries = translatedBlocks.map {
+                        TranslatedImageEntry(sourceText = it.text, translatedText = it.translatedText)
+                    }
+                    imageTranslationStatus = "תורגמו ${translatedBlocks.size} אזורי טקסט בהצלחה"
+                } else {
+                    imageTranslationStatus = "אין מספיק זיכרון לציור התמונה המתורגמת"
                 }
-                imageTranslationStatus = "תורגמו ${translatedBlocks.size} אזורי טקסט בהצלחה"
-            } catch (_: Exception) {
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                CrashGuard.recordError("MainActivity.translateImage", t)
                 imageTranslationStatus = "אירעה שגיאה בעיבוד התמונה"
             } finally {
                 isTranslatingImage = false
@@ -651,7 +692,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun decodeScaledSoftwareBitmap(uri: Uri, maxDimension: Int): Bitmap? {
-        return try {
+        return CrashGuard.safeCall("MainActivity.decodeBitmap", null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val src = ImageDecoder.createSource(contentResolver, uri)
                 ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
@@ -674,7 +715,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val rawW = boundsOpts.outWidth
                 val rawH = boundsOpts.outHeight
-                if (rawW <= 0 || rawH <= 0) return null
+                if (rawW <= 0 || rawH <= 0) return@safeCall null
 
                 var sampleSize = 1
                 while ((rawW / sampleSize) > maxDimension || (rawH / sampleSize) > maxDimension) {
@@ -688,8 +729,6 @@ class MainActivity : ComponentActivity() {
                     BitmapFactory.decodeStream(input, null, decodeOpts)
                 }
             }
-        } catch (_: Exception) {
-            null
         }
     }
 
@@ -697,173 +736,181 @@ class MainActivity : ComponentActivity() {
         sourceBitmap: Bitmap,
         blocks: List<RecognizedBlock>,
         isTargetRtl: Boolean
-    ): Bitmap {
-        val output = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = AndroidCanvas(output)
-        val canvasW = output.width
-        val canvasH = output.height
+    ): Bitmap? {
+        if (sourceBitmap.isRecycled || sourceBitmap.width <= 4 || sourceBitmap.height <= 4) return null
+        return CrashGuard.safeCall("MainActivity.renderImage", null) {
+            val output = sourceBitmap.copy(Bitmap.Config.ARGB_8888, true) ?: return@safeCall null
+            val canvas = AndroidCanvas(output)
+            val canvasW = output.width
+            val canvasH = output.height
 
-        val sorted = blocks.sortedWith(compareBy<RecognizedBlock> { it.bounds.top }.thenBy { it.bounds.left })
-        val padX = max(6f, canvasW * 0.008f)
-        val padY = max(4f, canvasH * 0.005f)
-        val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-        val textDir = if (isTargetRtl) TextDirectionHeuristics.RTL else TextDirectionHeuristics.LTR
+            val sorted = blocks.sortedWith(compareBy<RecognizedBlock> { it.bounds.top }.thenBy { it.bounds.left })
+            val padX = max(6f, canvasW * 0.008f)
+            val padY = max(4f, canvasH * 0.005f)
+            val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+            val textDir = if (isTargetRtl) TextDirectionHeuristics.RTL else TextDirectionHeuristics.LTR
 
-        for (i in sorted.indices) {
-            val block = sorted[i]
-            val text = block.translatedText
-            if (text.isEmpty()) continue
+            for (i in sorted.indices) {
+                val block = sorted[i]
+                val text = block.translatedText
+                if (text.isEmpty()) continue
 
-            val isRotated = abs(block.angleDegrees) >= 2.5f
-            val baseW = if (isRotated) block.orientedWidth else block.bounds.width()
-            val baseH = if (isRotated) block.orientedHeight else block.bounds.height()
-            val origW = baseW.coerceAtLeast(20)
-            val origH = baseH.coerceAtLeast(16)
-            val isCompactLabel = block.lineCount == 1 && origW < (canvasW * 0.50f)
+                val isRotated = abs(block.angleDegrees) >= 2.5f
+                val baseW = if (isRotated) block.orientedWidth else block.bounds.width()
+                val baseH = if (isRotated) block.orientedHeight else block.bounds.height()
+                val origW = baseW.coerceAtLeast(20)
+                val origH = baseH.coerceAtLeast(16)
+                val isCompactLabel = block.lineCount == 1 && origW < (canvasW * 0.50f)
 
-            val avgLineH = origH.toFloat() / block.lineCount.coerceAtLeast(1)
-            var fontSize = (avgLineH * 0.80f).coerceIn(16f, 56f)
+                val avgLineH = origH.toFloat() / block.lineCount.coerceAtLeast(1)
+                var fontSize = (avgLineH * 0.80f).coerceIn(16f, 56f)
 
-            val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = block.textColor
-                textSize = fontSize
-                isFakeBoldText = fontSize <= 26f || block.needsTextShadow
-                if (block.needsTextShadow) {
-                    setShadowLayer(2.5f, 0f, 1.5f, AndroidColor.argb(150, 0, 0, 0))
+                val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = block.textColor
+                    textSize = fontSize
+                    isFakeBoldText = fontSize <= 26f || block.needsTextShadow
+                    if (block.needsTextShadow) {
+                        setShadowLayer(2.5f, 0f, 1.5f, AndroidColor.argb(150, 0, 0, 0))
+                    }
                 }
-            }
 
-            var minAllowedLeft = 4f
-            var maxAllowedRight = canvasW - 4f
-            if (!isRotated) {
-                for (j in sorted.indices) {
-                    if (i == j) continue
-                    val other = sorted[j].bounds
-                    val vOverlap = min(block.bounds.bottom, other.bottom) - max(block.bounds.top, other.top)
-                    val minH = min(block.bounds.height(), other.height()).coerceAtLeast(1)
-                    if (vOverlap.toFloat() / minH > 0.30f) {
-                        if (other.right <= block.bounds.left + 8) {
-                            minAllowedLeft = max(minAllowedLeft, (other.right + block.bounds.left) / 2f + 2f)
-                        } else if (other.left >= block.bounds.right - 8) {
-                            maxAllowedRight = min(maxAllowedRight, (block.bounds.right + other.left) / 2f - 2f)
+                var minAllowedLeft = 4f
+                var maxAllowedRight = canvasW - 4f
+                if (!isRotated) {
+                    for (j in sorted.indices) {
+                        if (i == j) continue
+                        val other = sorted[j].bounds
+                        val vOverlap = min(block.bounds.bottom, other.bottom) - max(block.bounds.top, other.top)
+                        val minH = min(block.bounds.height(), other.height()).coerceAtLeast(1)
+                        if (vOverlap.toFloat() / minH > 0.30f) {
+                            if (other.right <= block.bounds.left + 8) {
+                                minAllowedLeft = max(minAllowedLeft, (other.right + block.bounds.left) / 2f + 2f)
+                            } else if (other.left >= block.bounds.right - 8) {
+                                maxAllowedRight = min(maxAllowedRight, (block.bounds.right + other.left) / 2f - 2f)
+                            }
                         }
                     }
                 }
-            }
 
-            val targetRect: RectF
-            val layout: StaticLayout
-
-            if (isCompactLabel) {
-                val colLimit = (maxAllowedRight - minAllowedLeft - padX * 2f).coerceAtLeast(origW.toFloat())
-                val maxAllowedW = min(colLimit, max(origW * 1.45f, canvasW * 0.30f))
-                var measuredW = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
-
-                while (measuredW > maxAllowedW && fontSize > 13f) {
-                    fontSize -= 1.2f
-                    textPaint.textSize = fontSize
-                    measuredW = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
+                if (maxAllowedRight - minAllowedLeft < 36f) {
+                    minAllowedLeft = 4f
+                    maxAllowedRight = canvasW - 4f
                 }
 
-                val layoutW = max(origW.toFloat(), min(measuredW, maxAllowedW)).toInt().coerceAtLeast(24)
-                layout = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
-                    .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                    .setTextDirection(textDir)
-                    .setIncludePad(false)
-                    .build()
+                val targetRect: RectF
+                val layout: StaticLayout
 
-                val boxW = max(origW + padX * 2f, layoutW + padX * 2f)
-                val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
-                val cx = block.bounds.exactCenterX()
-                val cy = block.bounds.exactCenterY()
+                if (isCompactLabel) {
+                    val colLimit = (maxAllowedRight - minAllowedLeft - padX * 2f).coerceAtLeast(origW.toFloat())
+                    val maxAllowedW = min(colLimit, max(origW * 1.45f, canvasW * 0.30f))
+                    var measuredW = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
 
-                var left = cx - boxW / 2f
-                var right = cx + boxW / 2f
-                if (!isRotated) {
-                    if (left < minAllowedLeft) {
-                        right += (minAllowedLeft - left)
-                        left = minAllowedLeft
+                    while (measuredW > maxAllowedW && fontSize > 13f) {
+                        fontSize -= 1.2f
+                        textPaint.textSize = fontSize
+                        measuredW = ceil(StaticLayout.getDesiredWidth(text, textPaint).toDouble()).toFloat()
                     }
-                    if (right > maxAllowedRight) {
-                        left -= (right - maxAllowedRight)
-                        right = maxAllowedRight
-                    }
-                    left = left.coerceAtLeast(minAllowedLeft)
-                    right = right.coerceAtMost(maxAllowedRight).coerceAtLeast(left + 24f)
-                }
-                val top = (cy - boxH / 2f).coerceAtLeast(2f)
-                val bottom = (top + boxH).coerceAtMost(canvasH - 2f)
-                targetRect = RectF(left, top, right, bottom)
-            } else {
-                val left = if (isRotated) {
-                    block.bounds.exactCenterX() - origW / 2f - padX
-                } else {
-                    (block.bounds.left - padX).coerceAtLeast(minAllowedLeft)
-                }
-                val right = if (isRotated) {
-                    block.bounds.exactCenterX() + origW / 2f + padX
-                } else {
-                    (block.bounds.right + padX).coerceAtMost(maxAllowedRight)
-                }
-                val layoutW = (right - left - padX * 2f).toInt().coerceAtLeast(36)
 
-                var fitted = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
-                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                    .setTextDirection(textDir)
-                    .setIncludePad(false)
-                    .build()
-                while (fitted.height > origH + padY && fontSize > 13f) {
-                    fontSize -= 1.2f
-                    textPaint.textSize = fontSize
-                    fitted = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
+                    val layoutW = max(origW.toFloat(), min(measuredW, maxAllowedW)).toInt().coerceAtLeast(24)
+                    layout = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
+                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                        .setTextDirection(textDir)
+                        .setIncludePad(false)
+                        .build()
+
+                    val boxW = max(origW + padX * 2f, layoutW + padX * 2f)
+                    val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
+                    val cx = block.bounds.exactCenterX()
+                    val cy = block.bounds.exactCenterY()
+
+                    var left = cx - boxW / 2f
+                    var right = cx + boxW / 2f
+                    if (!isRotated) {
+                        if (left < minAllowedLeft) {
+                            right += (minAllowedLeft - left)
+                            left = minAllowedLeft
+                        }
+                        if (right > maxAllowedRight) {
+                            left -= (right - maxAllowedRight)
+                            right = maxAllowedRight
+                        }
+                        left = left.coerceAtLeast(minAllowedLeft)
+                        right = right.coerceAtMost(maxAllowedRight).coerceAtLeast(left + 24f)
+                    }
+                    val top = (cy - boxH / 2f).coerceIn(2f, (canvasH - 20f).coerceAtLeast(2f))
+                    val bottom = (top + boxH).coerceIn(top + 10f, canvasH - 2f)
+                    targetRect = RectF(left, top, right, bottom)
+                } else {
+                    val left = if (isRotated) {
+                        block.bounds.exactCenterX() - origW / 2f - padX
+                    } else {
+                        (block.bounds.left - padX).coerceAtLeast(minAllowedLeft)
+                    }
+                    val right = if (isRotated) {
+                        block.bounds.exactCenterX() + origW / 2f + padX
+                    } else {
+                        (block.bounds.right + padX).coerceAtMost(maxAllowedRight)
+                    }
+                    val layoutW = (right - left - padX * 2f).toInt().coerceAtLeast(36)
+
+                    var fitted = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
                         .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                         .setTextDirection(textDir)
                         .setIncludePad(false)
                         .build()
-                }
-                layout = fitted
+                    while (fitted.height > origH + padY && fontSize > 13f) {
+                        fontSize -= 1.2f
+                        textPaint.textSize = fontSize
+                        fitted = StaticLayout.Builder.obtain(text, 0, text.length, textPaint, layoutW)
+                            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                            .setTextDirection(textDir)
+                            .setIncludePad(false)
+                            .build()
+                    }
+                    layout = fitted
 
-                val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
-                val top = if (isRotated) {
-                    block.bounds.exactCenterY() - boxH / 2f
+                    val boxH = max(origH + padY * 2f, layout.height + padY * 2f)
+                    val top = if (isRotated) {
+                        block.bounds.exactCenterY() - boxH / 2f
+                    } else {
+                        (block.bounds.top - padY).coerceIn(2f, (canvasH - 20f).coerceAtLeast(2f))
+                    }
+                    val bottom = (top + boxH).coerceIn(top + 10f, canvasH - 2f)
+                    targetRect = RectF(left, top, right.coerceAtLeast(left + 24f), bottom)
+                }
+
+                val topCol = block.bgTopColor or -0x1000000
+                val botCol = block.bgBottomColor or -0x1000000
+                if (topCol != botCol && targetRect.bottom > targetRect.top + 1f) {
+                    boxPaint.shader = LinearGradient(
+                        targetRect.left,
+                        targetRect.top,
+                        targetRect.left,
+                        targetRect.bottom,
+                        topCol,
+                        botCol,
+                        Shader.TileMode.CLAMP
+                    )
                 } else {
-                    (block.bounds.top - padY).coerceAtLeast(2f)
+                    boxPaint.shader = null
+                    boxPaint.color = topCol
                 }
-                val bottom = (top + boxH).coerceAtMost(canvasH - 2f)
-                targetRect = RectF(left, top, right, bottom)
+
+                canvas.save()
+                if (isRotated) {
+                    canvas.rotate(block.angleDegrees, targetRect.centerX(), targetRect.centerY())
+                }
+                canvas.drawRoundRect(targetRect, 8f, 8f, boxPaint)
+
+                val textLeft = targetRect.left + (targetRect.width() - layout.width) / 2f
+                val textTop = targetRect.top + (targetRect.height() - layout.height) / 2f
+                canvas.translate(textLeft, textTop)
+                layout.draw(canvas)
+                canvas.restore()
             }
 
-            val topCol = block.bgTopColor or -0x1000000
-            val botCol = block.bgBottomColor or -0x1000000
-            if (topCol != botCol) {
-                boxPaint.shader = LinearGradient(
-                    targetRect.left,
-                    targetRect.top,
-                    targetRect.left,
-                    targetRect.bottom,
-                    topCol,
-                    botCol,
-                    Shader.TileMode.CLAMP
-                )
-            } else {
-                boxPaint.shader = null
-                boxPaint.color = topCol
-            }
-
-            canvas.save()
-            if (isRotated) {
-                canvas.rotate(block.angleDegrees, targetRect.centerX(), targetRect.centerY())
-            }
-            canvas.drawRoundRect(targetRect, 8f, 8f, boxPaint)
-
-            val textLeft = targetRect.left + (targetRect.width() - layout.width) / 2f
-            val textTop = targetRect.top + (targetRect.height() - layout.height) / 2f
-            canvas.translate(textLeft, textTop)
-            layout.draw(canvas)
-            canvas.restore()
+            output
         }
-
-        return output
     }
 
     private fun testTranslation() {
@@ -878,36 +925,38 @@ class MainActivity : ComponentActivity() {
         isTestingTranslation = true
         val currentSrc = sourceLang
         val currentTgt = targetLang
-        lifecycleScope.launch {
-            val startMs = System.currentTimeMillis()
-            if (offlineOnlyMode && !isPairModelReady) {
-                val res = translationEngine.prepareModel(currentSrc, currentTgt)
-                if (res.isFailure) {
-                    sampleOutput = "יש להוריד קודם את המודל (${currentSrc.nameHe} ← ${currentTgt.nameHe})"
-                    isTestingTranslation = false
-                    translationRevealKey++
-                    return@launch
+        lifecycleScope.launch(uiErrorHandler) {
+            try {
+                val startMs = System.currentTimeMillis()
+                if (offlineOnlyMode && !isPairModelReady) {
+                    val res = translationEngine.prepareModel(currentSrc, currentTgt)
+                    if (res.isFailure) {
+                        sampleOutput = "יש להוריד קודם את המודל (${currentSrc.nameHe} ← ${currentTgt.nameHe})"
+                        translationRevealKey++
+                        return@launch
+                    }
+                    isPairModelReady = true
+                    downloadedLangCodes = translationEngine.getDownloadedLanguageCodes()
                 }
-                isPairModelReady = true
-                downloadedLangCodes = translationEngine.getDownloadedLanguageCodes()
+                val translated = translationEngine.translateText(
+                    text = sampleInput,
+                    source = currentSrc,
+                    target = currentTgt,
+                    offlineOnly = offlineOnlyMode
+                )
+                val elapsed = System.currentTimeMillis() - startMs
+                if (enableUiAnimations && elapsed < 350L) {
+                    delay(350L - elapsed)
+                }
+                sampleOutput = if (translated.isNotEmpty()) {
+                    translated
+                } else {
+                    "לא התקבל תרגום — ודא שהטקסט ב${currentSrc.nameHe}"
+                }
+                translationRevealKey++
+            } finally {
+                isTestingTranslation = false
             }
-            val translated = translationEngine.translateText(
-                text = sampleInput,
-                source = currentSrc,
-                target = currentTgt,
-                offlineOnly = offlineOnlyMode
-            )
-            val elapsed = System.currentTimeMillis() - startMs
-            if (enableUiAnimations && elapsed < 350L) {
-                delay(350L - elapsed)
-            }
-            sampleOutput = if (translated.isNotEmpty()) {
-                translated
-            } else {
-                "לא התקבל תרגום — ודא שהטקסט ב${currentSrc.nameHe}"
-            }
-            isTestingTranslation = false
-            translationRevealKey++
         }
     }
 
@@ -916,11 +965,17 @@ class MainActivity : ComponentActivity() {
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
             Uri.parse("package:$packageName")
         )
-        runCatching {
+        val opened = CrashGuard.safeCall("MainActivity.openOverlayPkg", false) {
             startActivity(packageIntent)
-        }.onFailure {
-            runCatching {
+            true
+        }
+        if (!opened) {
+            val fallbackOpened = CrashGuard.safeCall("MainActivity.openOverlayGeneric", false) {
                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+                true
+            }
+            if (!fallbackOpened) {
+                statusMessage = "לא ניתן לפתוח את הגדרות ההרשאות במכשיר זה"
             }
         }
     }
@@ -944,8 +999,11 @@ class MainActivity : ComponentActivity() {
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
             if (!granted) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                return
+                val asked = CrashGuard.safeCall("MainActivity.reqNotif", false) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    true
+                }
+                if (asked) return
             }
         }
 
@@ -953,13 +1011,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun launchScreenCapturePrompt() {
-        val projectionManager =
-            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+        val launched = CrashGuard.safeCall("MainActivity.launchProjection", false) {
+            val projectionManager =
+                getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+                    ?: return@safeCall false
+            projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            true
+        }
+        if (!launched) {
+            statusMessage = "לא ניתן להפעיל את חלונית צילום המסך במכשיר זה"
+        }
     }
 
     private fun stopOverlayService() {
-        stopService(Intent(this, OverlayService::class.java))
+        CrashGuard.safeRun("MainActivity.stopService") {
+            stopService(Intent(this, OverlayService::class.java))
+        }
         statusMessage = "המתרגם הופסק"
     }
 }
@@ -1817,7 +1884,6 @@ private fun TestTabScreen(
             )
         }
 
-        // Image Upload & Visual Translation Card with Laser Scanner
         AnimatedGlassCard(staggerIndex = 2, animationsEnabled = animationsEnabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2641,7 +2707,9 @@ private fun GlassToggleRow(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                CrashGuard.safeRun("ToggleHaptic") {
+                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                }
                 onCheckedChange(!checked)
             },
         verticalAlignment = Alignment.CenterVertically,
@@ -2670,7 +2738,9 @@ private fun GlassToggleRow(
         ObsidianToggleSwitch(
             checked = checked,
             onCheckedChange = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                CrashGuard.safeRun("ToggleHaptic") {
+                    view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                }
                 onCheckedChange(it)
             }
         )
